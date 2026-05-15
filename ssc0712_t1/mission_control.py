@@ -66,6 +66,10 @@ DET_CY = 2
 DET_AREA = 3
 MIN_DETECT_AREA = 0.0005
 
+# Roda: borda externa a 0.20m do centro. Abaixo desse limiar o movimento
+# angular pode aproximar a roda o suficiente para enganchar num obstaculo.
+WHEEL_SAFE_DIST = 0.40
+
 
 class MissionControl(Node):
     def __init__(self):
@@ -102,6 +106,13 @@ class MissionControl(Node):
         self.front_min = float('inf')
         self.left_min = float('inf')
         self.right_min = float('inf')
+        # Zonas laterais puras (90°±40°) para detectar enganche de roda.
+        self.side_left_min = float('inf')
+        self.side_right_min = float('inf')
+        # Corridor check: ha obstaculo dentro da largura da roda no caminho a frente?
+        # Roda a 0.20m do centro + 0.06m margem = 0.26m metade da largura critica.
+        self.path_left_blocked = False
+        self.path_right_blocked = False
 
         # FSM
         self.state = State.AGUARDANDO_COMANDO
@@ -142,6 +153,35 @@ class MissionControl(Node):
         self.front_min = window_min(0, FRONT_HALF_DEG)
         self.left_min = window_min(60, 30)
         self.right_min = window_min(300, 30)
+        # Janela alargada: roda esta em x=-0.12m do centro; quando a roda esta
+        # ao lado do obstaculo, o LIDAR ve esse obstaculo a ~121° (nao a 90°).
+        # 90°±40° = 50°–130° cobre toda a zona de enganche da roda.
+        self.side_left_min = window_min(90, 40)
+        self.side_right_min = window_min(270, 40)
+
+        # Corridor check: projeta cada leitura frontal no eixo lateral e verifica
+        # se algum obstaculo cai dentro da faixa da roda (0.26m do centro).
+        # Usando projecao geometrica: lat = r*sin(a), fwd = r*cos(a).
+        # Cobre ate 0.70m a frente — tempo suficiente para desviar antes de enganchar.
+        CORRIDOR_HALF_W = 0.26
+        CORRIDOR_DEPTH = 0.70
+        path_left = False
+        path_right = False
+        for i in range(n):
+            r = msg.ranges[i]
+            if not math.isfinite(r) or r <= 0.0:
+                continue
+            a = math.radians(i)
+            fwd = r * math.cos(a)
+            if fwd <= 0.05 or fwd > CORRIDOR_DEPTH:
+                continue
+            lat = r * math.sin(a)   # positivo = esquerda, negativo = direita
+            if 0.0 < lat < CORRIDOR_HALF_W:
+                path_left = True
+            elif -CORRIDOR_HALF_W < lat < 0.0:
+                path_right = True
+        self.path_left_blocked = path_left
+        self.path_right_blocked = path_right
 
     def on_start(self, msg: Bool):
         if msg.data and self.state == State.AGUARDANDO_COMANDO:
@@ -211,8 +251,22 @@ class MissionControl(Node):
             t.linear.x = 0.0
         else:
             self.serpentine_phase += 0.1
-            t.linear.x = V_EXPLORE
-            t.angular.z = 0.3 * math.sin(self.serpentine_phase * 0.7)
+            w = 0.3 * math.sin(self.serpentine_phase * 0.7)
+            v = V_EXPLORE
+            # Corridor check: desvia antes que a roda (x=-0.12m) chegue ao
+            # obstaculo. A projecao geometrica detecta cilindros no caminho
+            # que estao a ~30-70° e so chegariam a 90°+ quando ja eh tarde.
+            if self.path_left_blocked and not self.path_right_blocked:
+                w = -0.35               # vira direita antes de enganchar
+                v = V_EXPLORE * 0.65
+            elif self.path_right_blocked and not self.path_left_blocked:
+                w = 0.35                # vira esquerda
+                v = V_EXPLORE * 0.65
+            elif self.path_left_blocked and self.path_right_blocked:
+                w = 0.0                 # corredor estreito: vai reto devagar
+                v = V_EXPLORE * 0.40
+            t.linear.x = v
+            t.angular.z = w
         return t
 
     def _navigate_step(self) -> Twist:
@@ -224,6 +278,17 @@ class MissionControl(Node):
         cx = self.flag[1]
         t.angular.z = -1.2 * cx
         v = V_NAV * max(0.0, 1.0 - abs(cx))
+        # Corridor check durante navegacao: mesma projecao geometrica do
+        # _explore_step. Adiciona bias angular para afastar a roda do cilindro
+        # antes de enganchar, mantendo o tracking da bandeira como base.
+        if self.path_left_blocked and not self.path_right_blocked:
+            t.angular.z = max(t.angular.z - 0.45, -W_TURN_OBSTACLE)
+            v *= 0.70
+        elif self.path_right_blocked and not self.path_left_blocked:
+            t.angular.z = min(t.angular.z + 0.45, W_TURN_OBSTACLE)
+            v *= 0.70
+        elif self.path_left_blocked and self.path_right_blocked:
+            v *= 0.40
         if self.front_min < OBSTACLE_DIST:
             v = 0.0
             side_bias = W_TURN_OBSTACLE
