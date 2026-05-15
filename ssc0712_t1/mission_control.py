@@ -307,8 +307,13 @@ class MissionControl(Node):
                 t.angular.z = 0.0
             else:
                 self.serpentine_phase += 0.1
+                # Espaco muito aberto: quase reto (wobble minimo para nao
+                # repetir o mesmo caminho). Com obstaculo mais proximo: curva
+                # levemente para varrer a area. Amplitude reducida para evitar
+                # que o robo acabe apontando para tras desnecessariamente.
+                amplitude = 0.07 if self.front_min > 2.5 else 0.15
                 t.linear.x = V_EXPLORE
-                t.angular.z = 0.3 * math.sin(self.serpentine_phase * 0.7)
+                t.angular.z = amplitude * math.sin(self.serpentine_phase * 0.7)
         return t
 
     def _navigate_step(self) -> Twist:
