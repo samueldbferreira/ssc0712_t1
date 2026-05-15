@@ -110,10 +110,13 @@ class MissionControl(Node):
         # Zonas laterais puras (90°±40°) para detectar enganche de roda.
         self.side_left_min = float('inf')
         self.side_right_min = float('inf')
-        # Corridor check: ha obstaculo dentro da largura da roda no caminho a frente?
-        # Roda a 0.20m do centro + 0.06m margem = 0.26m metade da largura critica.
+        # Corridor check — dois limiares:
+        #   path_*_blocked  (zona amarela 0.35m): vira e reduz velocidade
+        #   inner_*_blocked (zona vermelha 0.24m): para completamente e vira forte
         self.path_left_blocked = False
         self.path_right_blocked = False
+        self.inner_left_blocked = False
+        self.inner_right_blocked = False
         # Direction lock: evita oscilacao esq/dir causada por ruido do LIDAR.
         # Uma vez escolhida a direcao, mantem por TURN_LOCK_SECS antes de reavaliar.
         self._turn_dir = 0          # +1 = esquerda, -1 = direita
@@ -165,16 +168,16 @@ class MissionControl(Node):
         self.side_left_min = window_min(90, 40)
         self.side_right_min = window_min(270, 40)
 
-        # Corridor check: projeta cada leitura frontal no eixo lateral e verifica
-        # se algum obstaculo cai dentro da faixa da roda (0.26m do centro).
-        # Usando projecao geometrica: lat = r*sin(a), fwd = r*cos(a).
-        # Cobre ate 0.70m a frente — tempo suficiente para desviar antes de enganchar.
-        # 0.35m: cobre cilindros cuja superficie aparece ate y=0.35m no LIDAR
-        # dependendo do angulo de leitura, mas que ainda tocam a roda (y=0.20m).
+        # Corridor check: projeta cada leitura frontal no eixo lateral.
+        # Zona amarela 0.35m: desvia suave. Zona vermelha 0.24m (roda 0.20m + margem):
+        # para completamente e vira forte antes que a roda engancha no obstaculo.
         CORRIDOR_HALF_W = 0.35
+        INNER_HALF_W = 0.24
         CORRIDOR_DEPTH = 0.75
         path_left = False
         path_right = False
+        inner_left = False
+        inner_right = False
         for i in range(n):
             r = msg.ranges[i]
             if not math.isfinite(r) or r <= 0.0:
@@ -186,10 +189,16 @@ class MissionControl(Node):
             lat = r * math.sin(a)   # positivo = esquerda, negativo = direita
             if 0.0 < lat < CORRIDOR_HALF_W:
                 path_left = True
+                if lat < INNER_HALF_W:
+                    inner_left = True
             elif -CORRIDOR_HALF_W < lat < 0.0:
                 path_right = True
+                if lat > -INNER_HALF_W:
+                    inner_right = True
         self.path_left_blocked = path_left
         self.path_right_blocked = path_right
+        self.inner_left_blocked = inner_left
+        self.inner_right_blocked = inner_right
 
     def on_start(self, msg: Bool):
         if msg.data and self.state == State.AGUARDANDO_COMANDO:
@@ -279,23 +288,27 @@ class MissionControl(Node):
             t.angular.z = W_TURN_OBSTACLE * self._pick_turn_dir()
             t.linear.x = 0.0
         else:
-            self.serpentine_phase += 0.1
-            w = 0.3 * math.sin(self.serpentine_phase * 0.7)
-            v = V_EXPLORE
-            # Corridor check: desvia antes que a roda (x=-0.12m) chegue ao
-            # obstaculo. A projecao geometrica detecta cilindros no caminho
-            # que estao a ~30-70° e so chegariam a 90°+ quando ja eh tarde.
-            if self.path_left_blocked and not self.path_right_blocked:
-                w = -0.35               # vira direita antes de enganchar
-                v = V_EXPLORE * 0.65
+            # Zona vermelha: roda quase no obstaculo — para e vira forte.
+            if self.inner_left_blocked and not self.inner_right_blocked:
+                t.linear.x = 0.0
+                t.angular.z = -0.70
+            elif self.inner_right_blocked and not self.inner_left_blocked:
+                t.linear.x = 0.0
+                t.angular.z = 0.70
+            # Zona amarela: obstaculo entrando no corredor — reduz e desvia.
+            elif self.path_left_blocked and not self.path_right_blocked:
+                t.linear.x = V_EXPLORE * 0.65
+                t.angular.z = -0.35
             elif self.path_right_blocked and not self.path_left_blocked:
-                w = 0.35                # vira esquerda
-                v = V_EXPLORE * 0.65
+                t.linear.x = V_EXPLORE * 0.65
+                t.angular.z = 0.35
             elif self.path_left_blocked and self.path_right_blocked:
-                w = 0.0                 # corredor estreito: vai reto devagar
-                v = V_EXPLORE * 0.40
-            t.linear.x = v
-            t.angular.z = w
+                t.linear.x = V_EXPLORE * 0.40
+                t.angular.z = 0.0
+            else:
+                self.serpentine_phase += 0.1
+                t.linear.x = V_EXPLORE
+                t.angular.z = 0.3 * math.sin(self.serpentine_phase * 0.7)
         return t
 
     def _navigate_step(self) -> Twist:
@@ -313,11 +326,14 @@ class MissionControl(Node):
         t.angular.z = -1.2 * cx
         v = V_NAV * max(0.0, 1.0 - abs(cx))
         # Corridor check durante navegacao: SOBRESCREVE o tracking da bandeira
-        # se necessario. Logica aditiva nao funciona quando a bandeira e o
-        # cilindro estao no mesmo lado — o tracking vencia o desvio.
-        # min/max garante que a saida angular seja sempre suficientemente
-        # oposta ao lado bloqueado, independente do cx da bandeira.
-        if self.path_left_blocked and not self.path_right_blocked:
+        # se necessario. Zona vermelha para completamente; zona amarela desvia.
+        if self.inner_left_blocked and not self.inner_right_blocked:
+            t.angular.z = min(t.angular.z, -0.65)
+            v = 0.0
+        elif self.inner_right_blocked and not self.inner_left_blocked:
+            t.angular.z = max(t.angular.z, 0.65)
+            v = 0.0
+        elif self.path_left_blocked and not self.path_right_blocked:
             t.angular.z = min(t.angular.z, -0.45)  # garante giro para direita
             v *= 0.65
         elif self.path_right_blocked and not self.path_left_blocked:
