@@ -175,7 +175,7 @@
             <iyy>0.001</iyy>
             <izz>0.001</izz>
           </inertia>
-        </inertial>      
+        </inertial>
       </link>
 
       <!-- Defefinindo label da flag como 40 -->

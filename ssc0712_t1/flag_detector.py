@@ -23,6 +23,7 @@ Parametro ROS:
 import rclpy
 from rclpy.node import Node
 
+from rcl_interfaces.msg import ParameterDescriptor
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension, MultiArrayLayout
 
@@ -37,14 +38,25 @@ class FlagDetector(Node):
         super().__init__('flag_detector')
         self.bridge = CvBridge()
 
-        # Parametro: aceita int unico ou string "25,40,..." com varios labels.
-        self.declare_parameter('flag_label', '25')
-        raw = str(self.get_parameter('flag_label').value)
-        try:
-            self.flag_labels = [int(x.strip()) for x in raw.split(',') if x.strip()]
-        except ValueError:
-            self.get_logger().warn(f"flag_label invalido: '{raw}', usando [25]")
-            self.flag_labels = [25]
+        # Parametro: aceita int unico, string com 1 label ("40"), ou string
+        # com varios labels separados por virgula ("25,40").
+        # dynamic_typing=True permite que o launch passe int sem conflitar
+        # com o default string (Humble rejeita override de tipo diferente
+        # silenciosamente sem isso, deixando o detector com [25] default).
+        self.declare_parameter(
+            'flag_label', '25',
+            descriptor=ParameterDescriptor(dynamic_typing=True),
+        )
+        val = self.get_parameter('flag_label').value
+        if isinstance(val, int):
+            self.flag_labels = [val]
+        else:
+            raw = str(val)
+            try:
+                self.flag_labels = [int(x.strip()) for x in raw.split(',') if x.strip()]
+            except ValueError:
+                self.get_logger().warn(f"flag_label invalido: '{raw}', usando [25]")
+                self.flag_labels = [25]
         self.get_logger().info(f'procurando bandeira(s) label={self.flag_labels}')
 
         self.sub = self.create_subscription(
@@ -98,6 +110,17 @@ class FlagDetector(Node):
         now = self.get_clock().now()
         if (now - self._last_log).nanoseconds > 2e9:
             self._last_log = now
+            # DIAG: lista TODOS os labels unicos presentes na imagem.
+            # Se label 40 (ou o que self.flag_labels esperar) nao aparece
+            # aqui, o problema esta no Label plugin do SDF, nao na deteccao.
+            unique_labels, counts = np.unique(label_plane, return_counts=True)
+            top = sorted(zip(unique_labels.tolist(), counts.tolist()),
+                         key=lambda kv: -kv[1])[:8]
+            self.get_logger().info(
+                f'DIAG labels presentes (top): {top} | '
+                f'procurando={self.flag_labels} | '
+                f'encoding={msg.encoding} shape={label_plane.shape}'
+            )
             if out.data[0] > 0.5:
                 self.get_logger().info(
                     f'bandeira: cx={out.data[1]:+.2f} cy={out.data[2]:+.2f} '
