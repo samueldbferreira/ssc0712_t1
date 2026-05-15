@@ -81,7 +81,7 @@ class MissionControl(Node):
         # de folga ao braco (que estica 0.4m a frente).
         self.declare_parameter('capture_distance', 0.65)
         self.declare_parameter('close_area_ratio', 0.04)
-        self.declare_parameter('lost_frames_to_redetect', 12)
+        self.declare_parameter('lost_frames_to_redetect', 30)
 
         self.auto_start = self.get_parameter('auto_start').value
         self.auto_start_delay = float(self.get_parameter('auto_start_delay').value)
@@ -103,6 +103,7 @@ class MissionControl(Node):
         # Estado sensorial
         self.flag = (False, 0.0, 0.0, 0.0)
         self.lost_counter = 0
+        self.last_flag_cx = 0.0   # ultimo cx valido quando bandeira estava visivel
         self.front_min = float('inf')
         self.left_min = float('inf')
         self.right_min = float('inf')
@@ -113,6 +114,10 @@ class MissionControl(Node):
         # Roda a 0.20m do centro + 0.06m margem = 0.26m metade da largura critica.
         self.path_left_blocked = False
         self.path_right_blocked = False
+        # Direction lock: evita oscilacao esq/dir causada por ruido do LIDAR.
+        # Uma vez escolhida a direcao, mantem por TURN_LOCK_SECS antes de reavaliar.
+        self._turn_dir = 0          # +1 = esquerda, -1 = direita
+        self._turn_lock_until = 0.0
 
         # FSM
         self.state = State.AGUARDANDO_COMANDO
@@ -131,6 +136,7 @@ class MissionControl(Node):
         self.flag = (detected, msg.data[DET_CX], msg.data[DET_CY], msg.data[DET_AREA])
         if detected:
             self.lost_counter = 0
+            self.last_flag_cx = msg.data[DET_CX]   # guarda ultimo avistamento valido
         else:
             self.lost_counter += 1
 
@@ -163,8 +169,10 @@ class MissionControl(Node):
         # se algum obstaculo cai dentro da faixa da roda (0.26m do centro).
         # Usando projecao geometrica: lat = r*sin(a), fwd = r*cos(a).
         # Cobre ate 0.70m a frente — tempo suficiente para desviar antes de enganchar.
-        CORRIDOR_HALF_W = 0.26
-        CORRIDOR_DEPTH = 0.70
+        # 0.35m: cobre cilindros cuja superficie aparece ate y=0.35m no LIDAR
+        # dependendo do angulo de leitura, mas que ainda tocam a roda (y=0.20m).
+        CORRIDOR_HALF_W = 0.35
+        CORRIDOR_DEPTH = 0.75
         path_left = False
         path_right = False
         for i in range(n):
@@ -217,7 +225,9 @@ class MissionControl(Node):
                 self._set_state(State.POSICIONANDO_PARA_COLETA)
 
         elif self.state == State.REDETECTANDO_BANDEIRA:
-            twist.angular.z = W_TURN_SEARCH
+            # Gira em direcao ao ultimo cx valido: se a bandeira foi vista
+            # a esquerda (cx<0), gira esquerda (+); se a direita, gira direita (-).
+            twist.angular.z = W_TURN_SEARCH * (-1.0 if self.last_flag_cx > 0 else 1.0)
             if self.flag[0]:
                 self._set_state(State.NAVEGANDO_PARA_BANDEIRA)
             elif (time.monotonic() - self.state_entered_at) > 8.0:
@@ -239,15 +249,34 @@ class MissionControl(Node):
         self.cmd_pub.publish(twist)
 
     # ------------------------------------------------------------------
+    def _pick_turn_dir(self) -> int:
+        """Retorna +1 (esquerda) ou -1 (direita) com direction lock.
+
+        Teoria: bang-bang sem histerese oscila quando left_min ≈ right_min
+        devido ao ruido do sensor. O lock temporal garante que o robo complete
+        um arco significativo (~46° a 0.8 rad/s em 1s) antes de reavaliar,
+        eliminando a oscilacao. O lock e quebrado apenas se o lado escolhido
+        ficar fisicamente bloqueado (obstaculo se aproxima no lado travado).
+        """
+        now = time.monotonic()
+        # Honra o lock enquanto o lado escolhido ainda estiver aberto
+        if now < self._turn_lock_until and self._turn_dir != 0:
+            if self._turn_dir > 0 and self.left_min >= self.right_min * 0.6:
+                return self._turn_dir
+            if self._turn_dir < 0 and self.right_min >= self.left_min * 0.6:
+                return self._turn_dir
+            # Lado travado ficou significativamente pior: reavalia
+        d = 1 if self.left_min >= self.right_min else -1
+        self._turn_dir = d
+        self._turn_lock_until = now + 1.0   # lock de 1 segundo
+        return d
+
     def _explore_step(self) -> Twist:
         """Anda para frente com leve serpentina. Se LIDAR ve obstaculo
         frontal, gira para o lado mais aberto."""
         t = Twist()
         if self.front_min < OBSTACLE_DIST:
-            if self.left_min > self.right_min:
-                t.angular.z = W_TURN_OBSTACLE
-            else:
-                t.angular.z = -W_TURN_OBSTACLE
+            t.angular.z = W_TURN_OBSTACLE * self._pick_turn_dir()
             t.linear.x = 0.0
         else:
             self.serpentine_phase += 0.1
@@ -275,26 +304,30 @@ class MissionControl(Node):
         zera v: o braco (0.4m a frente, invisivel ao LIDAR) pode tocar o
         obstaculo se avancar enquanto rotaciona."""
         t = Twist()
-        cx = self.flag[1]
+        # Se bandeira visivel usa cx atual; se ocluida usa ultimo cx valido
+        # com ganho reduzido (0.4) para manter rumo sem oscilar.
+        if self.flag[0]:
+            cx = self.flag[1]
+        else:
+            cx = self.last_flag_cx * 0.4
         t.angular.z = -1.2 * cx
         v = V_NAV * max(0.0, 1.0 - abs(cx))
-        # Corridor check durante navegacao: mesma projecao geometrica do
-        # _explore_step. Adiciona bias angular para afastar a roda do cilindro
-        # antes de enganchar, mantendo o tracking da bandeira como base.
+        # Corridor check durante navegacao: SOBRESCREVE o tracking da bandeira
+        # se necessario. Logica aditiva nao funciona quando a bandeira e o
+        # cilindro estao no mesmo lado — o tracking vencia o desvio.
+        # min/max garante que a saida angular seja sempre suficientemente
+        # oposta ao lado bloqueado, independente do cx da bandeira.
         if self.path_left_blocked and not self.path_right_blocked:
-            t.angular.z = max(t.angular.z - 0.45, -W_TURN_OBSTACLE)
-            v *= 0.70
+            t.angular.z = min(t.angular.z, -0.45)  # garante giro para direita
+            v *= 0.65
         elif self.path_right_blocked and not self.path_left_blocked:
-            t.angular.z = min(t.angular.z + 0.45, W_TURN_OBSTACLE)
-            v *= 0.70
+            t.angular.z = max(t.angular.z, 0.45)   # garante giro para esquerda
+            v *= 0.65
         elif self.path_left_blocked and self.path_right_blocked:
             v *= 0.40
         if self.front_min < OBSTACLE_DIST:
             v = 0.0
-            side_bias = W_TURN_OBSTACLE
-            if self.right_min > self.left_min:
-                side_bias = -W_TURN_OBSTACLE
-            t.angular.z = side_bias
+            t.angular.z = W_TURN_OBSTACLE * self._pick_turn_dir()
         t.linear.x = v
         return t
 
