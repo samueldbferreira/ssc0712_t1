@@ -2,8 +2,8 @@
 """Detector visual da bandeira.
 
 Le /robot_cam/labels_map (imagem mono onde cada pixel = label id do plugin
-de segmentacao semantica do Gazebo). A bandeira tem label 40 (definido em
-arena.sdf). Publica em /flag_detection um Float32MultiArray com layout:
+de segmentacao semantica do Gazebo). Publica em /flag_detection um
+Float32MultiArray com layout:
 
     data[0] = detected      (0.0 ou 1.0)
     data[1] = center_x_norm ([-1, 1], 0 = centro horizontal da imagem)
@@ -11,6 +11,14 @@ arena.sdf). Publica em /flag_detection um Float32MultiArray com layout:
     data[3] = area_ratio    (fracao da imagem ocupada pela bandeira, 0..1)
 
 A maquina de estados consome esses 4 valores para decidir transicoes.
+
+Parametro ROS:
+    flag_label (int, default 25): id do label a procurar. Em mapas CTF
+        (arena_cilindros, arena_paredes, empty_arena) a bandeira do time
+        adversario (azul) tem label 25. No arena.sdf legado, a bandeira
+        tem label 40. Pode-se passar uma lista de labels separados por
+        virgula (ex: "25,40") para suportar varios mapas com a mesma
+        configuracao do detector.
 """
 import rclpy
 from rclpy.node import Node
@@ -21,7 +29,6 @@ from std_msgs.msg import Float32MultiArray, MultiArrayDimension, MultiArrayLayou
 from cv_bridge import CvBridge
 import numpy as np
 
-FLAG_LABEL = 40
 MIN_PIXELS = 30  # ignora ruido isolado de poucos pixels
 
 
@@ -29,6 +36,16 @@ class FlagDetector(Node):
     def __init__(self):
         super().__init__('flag_detector')
         self.bridge = CvBridge()
+
+        # Parametro: aceita int unico ou string "25,40,..." com varios labels.
+        self.declare_parameter('flag_label', '25')
+        raw = str(self.get_parameter('flag_label').value)
+        try:
+            self.flag_labels = [int(x.strip()) for x in raw.split(',') if x.strip()]
+        except ValueError:
+            self.get_logger().warn(f"flag_label invalido: '{raw}', usando [25]")
+            self.flag_labels = [25]
+        self.get_logger().info(f'procurando bandeira(s) label={self.flag_labels}')
 
         self.sub = self.create_subscription(
             Image, '/robot_cam/labels_map', self.on_image, 10
@@ -54,7 +71,8 @@ class FlagDetector(Node):
         else:
             label_plane = img
 
-        mask = (label_plane == FLAG_LABEL)
+        # Mascara: True para qualquer label da lista
+        mask = np.isin(label_plane, self.flag_labels)
         n_pixels = int(mask.sum())
         h, w = label_plane.shape[:2]
         total = h * w

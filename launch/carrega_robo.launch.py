@@ -1,6 +1,6 @@
 from launch import LaunchDescription
-from launch.substitutions import PathJoinSubstitution, Command
-from launch.actions import ExecuteProcess, RegisterEventHandler
+from launch.substitutions import PathJoinSubstitution, Command, LaunchConfiguration
+from launch.actions import ExecuteProcess, RegisterEventHandler, DeclareLaunchArgument
 from launch.event_handlers import OnProcessExit
 
 from launch_ros.substitutions import FindPackageShare
@@ -12,6 +12,13 @@ import os
 # Comando para controlar o robô: ros2 run teleop_twist_keyboard teleop_twist_keyboard
 
 def generate_launch_description():
+    # Argumentos de spawn (sobrescritiveis pelo launch pai start_mission)
+    spawn_x_arg = DeclareLaunchArgument('spawn_x', default_value='-2.8',
+                                       description='Spawn X do robo (m)')
+    spawn_y_arg = DeclareLaunchArgument('spawn_y', default_value='0.0',
+                                       description='Spawn Y do robo (m)')
+    spawn_z_arg = DeclareLaunchArgument('spawn_z', default_value='0.2',
+                                       description='Spawn Z do robo (m)')
     # ------------------------------------------------------
     # Caminho para o arquivo Xacro do robô
     # ------------------------------------------------------
@@ -144,13 +151,11 @@ def generate_launch_description():
         executable="create",
         output="screen",
         arguments=[
-            "-name", "prm_robot",          # Nome da entidade no simulador
-            "-topic", "robot_description", # Descrição do robô a ser utilizada
-            # Spawn dentro da arena hexagonal (x in [-3.5, 3.5], y in [-2.7, 2.7]).
-            # Bandeira esta em (1.8, 0); colocamos o robo no lado oposto, virado para a bandeira.
-            "-x", "-2.8",
-            "-y", "0.0",
-            "-z", "0.2",
+            "-name", "prm_robot",
+            "-topic", "robot_description",
+            "-x", LaunchConfiguration('spawn_x'),
+            "-y", LaunchConfiguration('spawn_y'),
+            "-z", LaunchConfiguration('spawn_z'),
             "--ros-args", "--log-level", "warn"
         ],
         parameters=[{"use_sim_time": True}],  # Usa o tempo simulado
@@ -220,6 +225,9 @@ def generate_launch_description():
     # ------------------------------------------------------
     # Inclui todos os nós definidos acima no lançamento.
     return LaunchDescription([
+        spawn_x_arg,
+        spawn_y_arg,
+        spawn_z_arg,
         bridge,
         robot_state_publisher_node,
         spawn_entity,
