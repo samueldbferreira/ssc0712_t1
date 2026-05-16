@@ -29,8 +29,7 @@ from enum import Enum
 import rclpy
 from rclpy.node import Node
 
-from sensor_msgs.msg import LaserScan, Imu, Image
-from nav_msgs.msg import Odometry
+from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Bool, Float32MultiArray, Float64MultiArray, String
 
@@ -98,7 +97,6 @@ class MissionControl(Node):
         self.create_subscription(Float32MultiArray, '/flag_detection',
                                  self.on_flag, 10)
         self.create_subscription(LaserScan, '/scan', self.on_scan, 10)
-        self.create_subscription(Odometry, '/odom_gt', self.on_odom, 10)
         self.create_subscription(Bool, '/start_mission', self.on_start, 10)
 
         # Estado sensorial
@@ -118,38 +116,12 @@ class MissionControl(Node):
         self.path_right_blocked = False
         self.inner_left_blocked = False
         self.inner_right_blocked = False
-        # Direction lock: evita oscilacao esq/dir causada por ruido do LIDAR.
-        # Uma vez escolhida a direcao, mantem por TURN_LOCK_SECS antes de reavaliar.
-        self._turn_dir = 0          # +1 = esquerda, -1 = direita
-        self._turn_lock_until = 0.0
-        # Yaw atual no frame do mundo (de /odom_gt). 0 = +X (em direcao a
-        # bandeira nos mapas CTF). Usado como soft-bias anti-retorno-a-base.
-        self.current_yaw = 0.0
-        # Min em todos os 360 graus (safety do scan rotacional)
-        self.all_around_min = float('inf')
-
         # FSM
         self.state = State.AGUARDANDO_COMANDO
         self._announce_state()
         self.state_entered_at = time.monotonic()
         self.start_time = time.monotonic()
         self.serpentine_phase = 0.0
-
-        # "Look-around" periodico: a cada SCAN_PERIOD_S sem ter visto a
-        # bandeira, executa uma rotacao de 360 graus para varrer o entorno.
-        # So dispara em EXPLORANDO (flag invisivel por construcao da FSM);
-        # alem disso, checa flag[0] na hora de comecar e durante o scan.
-        self.SCAN_PERIOD_S = 120.0     # intervalo entre scans (2 min)
-        # 180 graus: pi rad / 0.9 rad/s = 3.49s. Cobre a metade traseira
-        # do robo (a frente ja e vista enquanto explora). Termina virado
-        # pra tras, mas o anti-base bias reorienta pra +X em seguida.
-        self.SCAN_DURATION_S = 3.49
-        self.SCAN_OMEGA = 0.9
-        # Gripper varre raio 0.40m + margem 0.15m. So gira se o entorno
-        # todo tiver pelo menos esse espaco.
-        self.SCAN_MIN_CLEARANCE = 0.55
-        self._next_scan_at = time.monotonic() + self.SCAN_PERIOD_S
-        self._scan_until = 0.0
 
         self.timer = self.create_timer(0.1, self.step)
 
@@ -164,28 +136,11 @@ class MissionControl(Node):
             self.last_flag_cx = msg.data[DET_CX]   # guarda ultimo avistamento valido
         else:
             self.lost_counter += 1
-        # DIAG: log a cada ~2s o que recebeu do detector e o estado FSM
-        now = time.monotonic()
-        if not hasattr(self, '_diag_last') or now - self._diag_last > 2.0:
-            self._diag_last = now
-            raw = list(msg.data)
-            self.get_logger().info(
-                f'DIAG flag rcv raw={raw} -> detected={detected} '
-                f'(thr area>{MIN_DETECT_AREA}) | state={self.state.value} '
-                f'front_min={self.front_min:.2f}'
-            )
 
     def on_scan(self, msg: LaserScan):
         n = len(msg.ranges)
         if n == 0:
             return
-
-        # Min global em todos os 360 graus (para safety do scan rotacional:
-        # o gripper varre um circulo de raio 0.40m durante a rotacao, entao
-        # qualquer obstaculo dentro desse circulo + margem causa colisao).
-        all_vals = [msg.ranges[i] for i in range(n)
-                    if math.isfinite(msg.ranges[i]) and msg.ranges[i] > 0.0]
-        self.all_around_min = min(all_vals) if all_vals else float('inf')
 
         def window_min(center_deg, half_deg):
             lo = (center_deg - half_deg) % n
@@ -238,12 +193,6 @@ class MissionControl(Node):
         self.path_right_blocked = path_right
         self.inner_left_blocked = inner_left
         self.inner_right_blocked = inner_right
-
-    def on_odom(self, msg: Odometry):
-        q = msg.pose.pose.orientation
-        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        self.current_yaw = math.atan2(siny_cosp, cosy_cosp)
 
     def on_start(self, msg: Bool):
         if msg.data and self.state == State.AGUARDANDO_COMANDO:
@@ -304,63 +253,22 @@ class MissionControl(Node):
 
     # ------------------------------------------------------------------
     def _pick_turn_dir(self) -> int:
-        """Retorna +1 (esquerda) ou -1 (direita) com direction lock.
+        """Retorna +1 (esquerda) ou -1 (direita) baseado na fase atual da
+        serpentina.
 
-        Teoria: bang-bang sem histerese oscila quando left_min ≈ right_min
-        devido ao ruido do sensor. O lock temporal garante que o robo complete
-        um arco significativo (~46° a 0.8 rad/s em 1s) antes de reavaliar,
-        eliminando a oscilacao. O lock e quebrado apenas se o lado escolhido
-        ficar fisicamente bloqueado (obstaculo se aproxima no lado travado).
+        Antes escolhia o lado com mais espaco aberto (left_min vs right_min),
+        mas isso causava U-turn na fronteira entre area com obstaculos e area
+        vazia — a vazia parecia 'mais aberta', entao o desvio mandava o robo
+        de volta pelo caminho ja percorrido. Agora segue o sentido natural
+        do sweep da serpentina: nao tem preferencia por espaco vazio.
         """
-        now = time.monotonic()
-        # Honra o lock enquanto o lado escolhido ainda estiver aberto
-        if now < self._turn_lock_until and self._turn_dir != 0:
-            if self._turn_dir > 0 and self.left_min >= self.right_min * 0.6:
-                return self._turn_dir
-            if self._turn_dir < 0 and self.right_min >= self.left_min * 0.6:
-                return self._turn_dir
-            # Lado travado ficou significativamente pior: reavalia
-        d = 1 if self.left_min >= self.right_min else -1
-        self._turn_dir = d
-        self._turn_lock_until = now + 1.0   # lock de 1 segundo
-        return d
+        return 1 if math.sin(self.serpentine_phase * 0.7) >= 0 else -1
 
     def _explore_step(self) -> Twist:
-        """Anda para frente com serpentina. Se LIDAR ve obstaculo frontal,
-        gira para o lado mais aberto. A cada SCAN_PERIOD_S sem bandeira a
-        vista, faz uma rotacao completa para varrer o entorno."""
-        now = time.monotonic()
+        """Anda para frente com serpentina adaptativa. Se LIDAR ve obstaculo
+        frontal, gira para o lado mais aberto. Corridor checks fazem desvios
+        sutis para obstaculos laterais entrando no caminho."""
         t = Twist()
-
-        # --- Look-around scan: 360 graus periodico ---
-        # Tres condicoes pra INICIAR um scan:
-        #   1. Tempo decorrido desde ultimo scan >= SCAN_PERIOD_S
-        #   2. Bandeira NAO esta visivel (evita perder lock visual)
-        #   3. Entorno todo (360°) com folga >= SCAN_MIN_CLEARANCE (gripper
-        #      varre raio 0.4m durante a rotacao -- precisa de espaco)
-        # Durante o scan, abandona se a folga cair (parede se aproximou) ou
-        # se a bandeira aparecer.
-        in_scan = now < self._scan_until
-        if (not in_scan and now >= self._next_scan_at
-                and not self.flag[0]
-                and self.all_around_min >= self.SCAN_MIN_CLEARANCE):
-            self._scan_until = now + self.SCAN_DURATION_S
-            self._next_scan_at = now + self.SCAN_PERIOD_S
-            in_scan = True
-        elif not in_scan and now >= self._next_scan_at:
-            # Adia 5s e tenta de novo (espaco apertado ou bandeira a vista)
-            self._next_scan_at = now + 5.0
-
-        if in_scan:
-            if self.flag[0]:
-                self._scan_until = 0.0
-            elif self.all_around_min < self.SCAN_MIN_CLEARANCE - 0.10:
-                # Algo entrou na zona de risco do gripper: aborta
-                self._scan_until = 0.0
-            else:
-                t.angular.z = self.SCAN_OMEGA
-                t.linear.x = 0.0
-                return t
 
         if self.front_min < OBSTACLE_DIST:
             t.angular.z = W_TURN_OBSTACLE * self._pick_turn_dir()
@@ -385,8 +293,25 @@ class MissionControl(Node):
                 t.angular.z = 0.0
             else:
                 self.serpentine_phase += 0.1
-                t.linear.x = V_EXPLORE
-                t.angular.z = 0.30 * math.sin(self.serpentine_phase * 0.7)
+                # Velocidade e amplitude escalam com folga frontal:
+                #   espaco aberto (front>3m): rapido + serpentina larga,
+                #     cobre area lateral ampla, FOV de 90 graus pega
+                #     bandeiras fora do eixo
+                #   espaco medio (1.5-3m): velocidade e amplitude normais
+                #   espaco apertado (<1.5m): mais devagar, serpentina
+                #     minima — deixa corridor checks dominarem
+                if self.front_min > 3.0:
+                    v = V_EXPLORE * 1.5
+                    amplitude = 0.40
+                elif self.front_min > 1.5:
+                    v = V_EXPLORE
+                    amplitude = 0.20
+                else:
+                    v = V_EXPLORE * 0.7
+                    amplitude = 0.10
+
+                t.linear.x = v
+                t.angular.z = amplitude * math.sin(self.serpentine_phase * 0.7)
         return t
 
     def _navigate_step(self) -> Twist:
