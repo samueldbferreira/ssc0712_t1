@@ -27,10 +27,13 @@ Argumentos sobrescritiveis:
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     IncludeLaunchDescription,
     GroupAction,
+    RegisterEventHandler,
     TimerAction,
 )
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
     LaunchConfiguration,
@@ -158,16 +161,44 @@ def generate_launch_description():
         )],
     )
 
+    # --------------------------------------------------------------
+    # Cleanup: mata processos orfaos de execucoes anteriores
+    # --------------------------------------------------------------
+    # Ignition Gazebo, controllers e bridges costumam deixar processos
+    # zumbis quando o launch e morto com Ctrl+C. Esses zumbis quebram
+    # a proxima execucao (mundo tremendo, robo travado, GUI esquisita).
+    # Rodamos pkill antes de tudo e fazemos o resto esperar via
+    # OnProcessExit pra garantir que o ambiente esteja limpo.
+    cleanup_zombies = ExecuteProcess(
+        cmd=['bash', '-c',
+             'pkill -9 -f '
+             '"ign|gz |gz-|ruby|gazebo|rviz|robot_state_publisher|'
+             'spawner|controller_manager|flag_detector|mission_control|'
+             'ros_gz_bridge|parameter_bridge|ground_truth|robo_mapper" '
+             '|| true ; sleep 2'],
+        output='log',
+    )
+
+    start_after_cleanup = RegisterEventHandler(
+        event_handler=OnProcessExit(
+            target_action=cleanup_zombies,
+            on_exit=[
+                GroupAction([
+                    inicia_sim,
+                    carrega_robo,
+                    flag_detector,
+                    mission_control,
+                ]),
+            ],
+        )
+    )
+
     return LaunchDescription([
         world_arg,
         flag_label_arg,
         spawn_x_arg,
         spawn_y_arg,
         spawn_z_arg,
-        GroupAction([
-            inicia_sim,
-            carrega_robo,
-            flag_detector,
-            mission_control,
-        ]),
+        cleanup_zombies,
+        start_after_cleanup,
     ])
