@@ -210,16 +210,6 @@ def generate_launch_description():
         output="screen",
     )
 
-#  Casos vocês queiram carregar o controle do robô junto:
-#  Não esquecer de descomentar a linha no LaunchDescription
-#    controle= Node(
-#        package="ssc0712_t1",
-#        executable="controle_robo",
-#        name="controle_do_robo",
-#        arguments="",
-#        output="screen",
-#    )
-
     # ------------------------------------------------------
     # Definição da descrição completa do lançamento
     # ------------------------------------------------------

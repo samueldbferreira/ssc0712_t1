@@ -58,9 +58,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'tartaruga = ssc0712_t1.controle_tartaruga:main',
             'ground_truth_odometry = ssc0712_t1.ground_truth_odometry:main',
-            'controle_robo = ssc0712_t1.controle_robo:main',
             'robo_mapper = ssc0712_t1.robo_mapper:main',
             'flag_detector = ssc0712_t1.flag_detector:main',
             'mission_control = ssc0712_t1.mission_control:main',
