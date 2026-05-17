@@ -25,8 +25,9 @@
   <exec_depend>ros2_control</exec_depend>
   <exec_depend>ros2_controllers</exec_depend>
   <exec_depend>ros_gz_bridge</exec_depend>
-  <exec_depend>ros_ign_gazebo</exec_depend>
-  <exec_depend>ign_ros2_control</exec_depend>
+  <exec_depend>ros_gz_sim</exec_depend>
+  <!-- ign_ros2_control sem chave publica em rosdep; instalar manualmente:
+       sudo apt install ros-humble-ign-ros2-control -->
   <exec_depend>xacro</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>topic_tools</exec_depend>
