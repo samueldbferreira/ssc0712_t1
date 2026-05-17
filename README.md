@@ -196,5 +196,5 @@ ssc0712_t1/
 
 ## Autor
 
-Samuel Ferreira — SSC0712, ICMC/USP, 2026.
+Samuel Ferreira — 12543565
 Pacote base: <https://github.com/matheusbg8/prm_2026>.
