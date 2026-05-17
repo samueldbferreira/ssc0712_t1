@@ -4,76 +4,19 @@
 
 Sistema autônomo em ROS 2 que explora a arena, detecta uma bandeira por
 visão computacional (câmera de segmentação semântica do Gazebo) e se
-posiciona para capturá-la, com controle baseado em máquina de estados e
-percepção sensorial (LIDAR, IMU, odometria).
-
----
-
-## Sumário
-
-- [Requisitos](#requisitos)
-- [Compilação](#compilação)
-- [Execução](#execução)
-- [Mapas suportados](#mapas-suportados)
-- [Arquitetura](#arquitetura)
-- [Máquina de estados](#máquina-de-estados)
-- [Estrutura do repositório](#estrutura-do-repositório)
-- [Pôster / Slides](#pôster--slides)
+posiciona para capturá-la, com controle baseado em máquina de estados.
 
 ---
 
 ## Requisitos
 
-- **ROS 2 Humble** (Ubuntu 22.04) — versão exigida; o pacote NÃO roda em
-  Jazzy ou outras (substituições do launch são incompatíveis entre
-  versões; ver [Ambiente de execução](#ambiente-de-execução))
+- **ROS 2 Humble** (Ubuntu 22.04)
 - **Gazebo Fortress** (Ignition Gazebo 6)
 - Python 3.10+
-- Dependências resolvidas via `rosdep`: `ros_gz_bridge`, `ros_gz_sim`,
-  `robot_state_publisher`, `ros2_control`, `ros2_controllers`, `xacro`,
-  `rviz2`, `teleop_twist_keyboard`, `cv_bridge`, `python3-opencv`,
-  `scipy`
-
-### Ambiente de execução
-
-Se o seu host roda outro ROS 2 (ex.: Jazzy no Ubuntu 24.04), use um
-container Humble para compilar **e** executar — não basta compilar
-isolado. O autor desenvolveu usando um [distrobox](https://distrobox.it/)
-chamado `prm-humble` (Ubuntu 22.04) com o seguinte script auxiliar no
-workspace (`~/ros2_ws/container_env.sh`):
-
-```bash
-# limpa variáveis residuais do ROS Jazzy do host
-unset AMENT_PREFIX_PATH CMAKE_PREFIX_PATH COLCON_PREFIX_PATH \
-      PYTHONPATH LD_LIBRARY_PATH PKG_CONFIG_PATH \
-      ROS_PYTHON_VERSION ROS_VERSION ROS_DISTRO 2>/dev/null
-# remove paths do host do PATH (rbenv/pyenv/nvm/jazzy)
-# ... (omitido)
-source /opt/ros/humble/setup.bash
-[ -f "$HOME/ros2_ws/install/setup.bash" ] && source "$HOME/ros2_ws/install/setup.bash"
-```
-
-Sintoma de rodar fora do container: ao chamar `ros2 launch ...` no host
-Jazzy o launch falha com algo tipo
-`executable '[<launch.substitutions.text_substitution.TextSubstitution ...>]' not found on the PATH`,
-porque o sistema de substituições do launch tem diferenças entre Humble
-e Jazzy.
-
----
+- Dependências resolvidas via `rosdep`: `ros_gz_bridge`, `robot_state_publisher`,
+  `ros2_control`, `ros2_controllers`, `xacro`, `rviz2`, `cv_bridge`, `scipy`
 
 ## Compilação
-
-Coloque o pacote dentro de `~/ros2_ws/src/`:
-
-```bash
-mkdir -p ~/ros2_ws/src
-cd ~/ros2_ws/src
-git clone <URL-do-seu-fork>/ssc0712_t1.git
-```
-
-**Dentro do ambiente Humble** (host nativo Ubuntu 22.04 ou container
-`prm-humble` — ver [Ambiente de execução](#ambiente-de-execução)),
-instale dependências e compile:
 
 ```bash
 cd ~/ros2_ws
@@ -82,294 +25,175 @@ colcon build --symlink-install --packages-select ssc0712_t1
 source install/local_setup.bash
 ```
 
----
-
 ## Execução
-
-> ⚠ Execute também **dentro do ambiente Humble**. Se você estiver no
-> host com outro ROS 2, entre no container antes (ex.:
-> `distrobox enter prm-humble` e `source ~/ros2_ws/container_env.sh`).
-
-**Launch único** que sobe simulação + robô + sensores + detector visual +
-máquina de estados em um só comando:
 
 ```bash
 ros2 launch ssc0712_t1 start_mission.launch.py
 ```
 
-O robô parte de `AGUARDANDO_COMANDO`, espera 3 s para os sensores
-estabilizarem, e segue sozinho até `CAPTURADA`.
+Sobe simulação + robô + sensores + detector visual + máquina de estados em
+um único comando. O robô parte de `AGUARDANDO_COMANDO`, espera 5 s e segue
+sozinho até `CAPTURADA`.
 
-### Trocar de mapa
+Trocar de mapa:
 
 ```bash
-ros2 launch ssc0712_t1 start_mission.launch.py world:=arena_cilindros.sdf
 ros2 launch ssc0712_t1 start_mission.launch.py world:=arena_paredes.sdf
-ros2 launch ssc0712_t1 start_mission.launch.py world:=empty_arena.sdf
 ```
 
-O launch escolhe automaticamente o `flag_label` da bandeira-alvo e a
-posição de spawn do robô de acordo com o nome do mapa (ver tabela em
-[Mapas suportados](#mapas-suportados)). Para sobrescrever:
-
-```bash
-ros2 launch ssc0712_t1 start_mission.launch.py \
-    world:=arena_cilindros.sdf \
-    flag_label:=25 \
-    spawn_x:=-7.0 spawn_y:=0.5 spawn_z:=0.2
-```
+O launch escolhe automaticamente `flag_label` e posição de spawn pelo nome
+do mapa. Sobrescritíveis via argumentos do launch (`flag_label:=`,
+`spawn_x:=`, `spawn_y:=`, `spawn_z:=`).
 
 ### Inspecionar a missão
-
-Tópicos publicados:
 
 | Tópico | Tipo | Conteúdo |
 |---|---|---|
 | `/mission_state` | `std_msgs/String` | estado atual da FSM |
-| `/flag_detection` | `std_msgs/Float32MultiArray` | `[detected, cx_norm, cy_norm, area_ratio]` |
+| `/flag_detection` | `std_msgs/Float32MultiArray` | `[detected, cx, cy, area_ratio]` |
 | `/cmd_vel` | `geometry_msgs/Twist` | comando do controle |
-| `/scan` | `sensor_msgs/LaserScan` | LIDAR (360 raios) |
-| `/imu` | `sensor_msgs/Imu` | IMU |
+| `/scan` | `sensor_msgs/LaserScan` | LIDAR |
 | `/odom_gt` | `nav_msgs/Odometry` | odometria ground-truth |
-| `/robot_cam/labels_map` | `sensor_msgs/Image` | imagem de segmentação semântica |
 
 ```bash
 ros2 topic echo /mission_state
-ros2 topic echo /flag_detection
 ```
-
-### Controle manual (alternativo)
-
-Em outro terminal:
-
-```bash
-ros2 run teleop_twist_keyboard teleop_twist_keyboard
-```
-
----
 
 ## Mapas suportados
 
-Todos com bandeira embutida. O launch escolhe `flag_label` e spawn
-adequados ao nome do mapa.
-
-| Mapa | Bandeira (label) | Layout | Spawn do robô |
-|---|---|---|---|
-| `arena.sdf` (default) | 40 | hexágono ±3.5 m com obstáculos cilíndricos; bandeira em (1.8, 0) | `(-2.8, 0, 0.2)` |
-| `arena_cilindros.sdf` | 25 (`blue_flag`) | retângulo 18×8 m, formato CTF, obstáculos cilíndricos do time azul; alvo em (+8, 0) | `(-8.0, -0.5, 0.2)` na zona verde |
-| `arena_paredes.sdf` | 25 | igual ao anterior, mas com paredes no lado azul | `(-8.0, -0.5, 0.2)` na zona verde |
-| `empty_arena.sdf` | 25 | retângulo 18×8 m vazio (CTF sem obstáculos) | `(-5.5, 0, 0.2)` perto do red_base |
-
-A `flag_deploy_zone` (círculo verde no chão) marca a área onde o time
-"red" deve depositar uma bandeira capturada — também usada como spawn
-por ser um lugar livre de obstáculos próximo do red_base. Nos mapas
-CTF a bandeira-alvo é sempre a `blue_flag` (área do adversário).
-
----
+| Mapa | Bandeira (label) | Spawn |
+|---|---|---|
+| `arena.sdf` (default) | 40 | `(-2.8, 0, 0.2)` |
+| `arena_cilindros.sdf` | 25 | `(-8.0, -0.5, 0.2)` |
+| `arena_paredes.sdf` | 25 | `(-8.0, -0.5, 0.2)` |
+| `empty_arena.sdf` | 25 | `(-5.5, 0, 0.2)` |
 
 ## Arquitetura
 
 ```
-                    ┌──────────────────┐
-                    │   Gazebo Sim     │
-                    │   (mundo SDF)    │
-                    └────────┬─────────┘
-                             │ /scan, /imu, /odom_gt,
-                             │ /robot_cam/labels_map
-                             ▼
-        ┌────────────┐   ┌──────────────────┐
-        │ flag_      │◀──│ ros_gz_bridge    │
-        │ detector   │   └──────────────────┘
-        └──────┬─────┘
-   /flag_detection│
-                 ▼
-        ┌──────────────────────────────┐
-        │     mission_control          │
-        │  (FSM + planner reativo)     │
-        └────────────┬─────────────────┘
-                     │ /cmd_vel
-                     ▼
-              diff_drive_controller (ros2_control)
-                     │
-                     ▼
-                 Gazebo (robô)
+   Gazebo Sim ──► /scan, /odom_gt, /robot_cam/labels_map
+                              │
+                              ▼
+                       flag_detector ──► /flag_detection
+                                              │
+                                              ▼
+                                      mission_control
+                                              │ /cmd_vel
+                                              ▼
+                              diff_drive_controller (ros2_control)
 ```
 
 ### Nodos
 
-- **`flag_detector`** (`ssc0712_t1/flag_detector.py`): assina
-  `/robot_cam/labels_map`, procura pixels com o label da bandeira-alvo
-  (parâmetro ROS `flag_label`, default 25). Aceita lista (ex.:
-  `flag_label:="25,40"`) para múltiplos mapas. Quando o número de
-  pixels detectados ≥ `MIN_PIXELS`, publica em `/flag_detection` um
-  vetor de 4 floats: `[detected, cx_norm, cy_norm, area_ratio]`.
+- **`flag_detector`**: assina `/robot_cam/labels_map`, procura pixels com o
+  label da bandeira-alvo (parâmetro `flag_label`), publica
+  `/flag_detection` com `[detected, cx_norm, cy_norm, area_ratio]`.
 
-- **`mission_control`** (`ssc0712_t1/mission_control.py`): nó principal.
-  Implementa a máquina de estados, consome `/flag_detection`, `/scan`,
-  `/odom_gt`, decide e publica `/cmd_vel` a 10 Hz. Também publica
-  `/mission_state` em cada transição e `/gripper_controller/commands`
-  na captura para animar o braço.
+- **`mission_control`**: nó principal. FSM a 10 Hz, consome
+  `/flag_detection`, `/scan`, `/odom_gt`, publica `/cmd_vel` e
+  `/mission_state`. Fluxo do loop: watchdog → FSM → filtro anti-pendulação
+  → publish.
 
-- **`ground_truth_odometry`**: publica odometria precisa do simulador em
-  `/odom_gt`, consumida pelo `mission_control` para o bias
-  anti-retorno-a-base.
+- **`ground_truth_odometry`**: republica a pose do simulador como
+  `/odom_gt` e TF `odom_gt → base_link`.
 
-- **Launch unificado** (`launch/start_mission.launch.py`):
-  - Inclui `inicia_simulacao.launch.py` (Gazebo + bridges do mundo)
-  - Inclui `carrega_robo.launch.py` (URDF + controllers + bridges de
-    sensores) com `spawn_x/y/z` parametrizados
-  - Sobe `flag_detector` 8 s depois (espera a câmera publicar)
-  - Sobe `mission_control` 10 s depois (espera os controllers)
-  - Auto-seleciona `flag_label` e spawn baseado no nome do mapa via
-    dicionário `WORLD_PRESETS`
-
----
+- **`robo_mapper`**: TF estático `map → odom_gt` e `OccupancyGrid` marcando
+  células visitadas (visualização no RViz).
 
 ## Máquina de estados
 
 ```
-                  ┌─────────────────────┐
-                  │ AGUARDANDO_COMANDO  │  timer 3 s ou
-                  └─────────┬───────────┘  /start_mission
-                            ▼
-                  ┌─────────────────────┐
-           ┌─────▶│     EXPLORANDO      │
-           │      │  serpentina + dodge │
-           │      │  + look-around 2min │
-           │      └─────────┬───────────┘
-           │                │ flag detectada
-           │                ▼
-           │      ┌─────────────────────┐
-           │      │ BANDEIRA_DETECTADA  │ (0.4 s, anúncio)
-           │      └─────────┬───────────┘
-           │                ▼
-           │      ┌─────────────────────┐    perdeu N frames
-           │      │     NAVEGANDO_      │─────────────┐
-           │      │   PARA_BANDEIRA     │             │
-           │      │ heading-P + dodge   │             │
-           │      └─────────┬───────────┘             ▼
-           │                │ área ≥ threshold    ┌───────────────┐
-           │                ▼                     │ REDETECTANDO_ │
-           │      ┌─────────────────────┐         │   BANDEIRA    │
-           │      │  POSICIONANDO_      │         │ (gira para o  │
-           │      │  PARA_COLETA        │         │  último cx)   │
-           │      │ alinha cx + LIDAR   │         └──────┬────────┘
-           │      └─────────┬───────────┘                │
-           │                ▼                            │
-           │      ┌─────────────────────┐                │
-           │      │     CAPTURADA       │                │
-           │      │ stop + gripper anim │                │
-           │      └─────────────────────┘                │
-           │                                             │
-           └────────────── 8 s sem achar ────────────────┘
+   ┌──────────────────────┐  timer 5 s ou
+   │  AGUARDANDO_COMANDO  │  /start_mission
+   └──────────┬───────────┘
+              ▼
+   ┌──────────────────────┐
+┌──│      EXPLORANDO      │
+│  └──────────┬───────────┘
+│             │ bandeira detectada
+│             ▼
+│  ┌──────────────────────┐
+│  │ BANDEIRA_DETECTADA   │ pausa 0.5 s
+│  └──────────┬───────────┘
+│             ▼
+│  ┌──────────────────────┐  perdeu N frames
+│  │ NAVEGANDO_PARA_      │──────────────────┐
+│  │   BANDEIRA           │                  ▼
+│  └──────────┬───────────┘     ┌──────────────────────┐
+│             │ área ≥ thresh   │ REDETECTANDO_        │
+│             ▼                 │   BANDEIRA           │
+│  ┌──────────────────────┐     └──────────┬───────────┘
+│  │ POSICIONANDO_PARA_   │                │
+│  │   COLETA             │                │
+│  └──────────┬───────────┘                │
+│             ▼                            │
+│  ┌──────────────────────┐                │
+│  │     CAPTURADA        │                │
+│  └──────────────────────┘                │
+│                                          │
+└────────── 8 s sem achar ─────────────────┘
 ```
-
-### Comportamento por estado
 
 | Estado | Comportamento | Saída |
 |---|---|---|
-| `AGUARDANDO_COMANDO` | parado | timer 3 s ou `/start_mission=true` |
-| `EXPLORANDO` | anda para frente com serpentina; dodge frontal/lateral via LIDAR; "look-around" de 180° a cada 2 min; soft-bias anti-retorno-a-base usando yaw da odometria | bandeira visível |
-| `BANDEIRA_DETECTADA` | curto (0.4 s) para registrar a transição no log | timer |
-| `NAVEGANDO_PARA_BANDEIRA` | angular proporcional ao centro-x; reduz `v` com erro de heading; LIDAR continua desviando | área ≥ `close_area_ratio` → POSICIONANDO; perdeu N frames → REDETECTANDO |
-| `REDETECTANDO_BANDEIRA` | gira em direção ao último `cx` válido | viu de novo → NAVEGANDO; timeout 8 s → EXPLORANDO |
-| `POSICIONANDO_PARA_COLETA` | alinha `cx` fino e aproxima até `capture_distance` (LIDAR frontal); recua se raspar lateral | distância e centralização ok |
-| `CAPTURADA` | para; anima o gripper (oscila o braço e abre/fecha as garras) | final |
+| `AGUARDANDO_COMANDO` | parado | timer 5 s ou `/start_mission=true` |
+| `EXPLORANDO` | wall-following à direita se houver parede em < 5 m, senão serpentina; corridor checks para desvios; `_resolve_turn` quando a frente bloqueia | bandeira detectada |
+| `BANDEIRA_DETECTADA` | parado 0.5 s para registrar a transição | timer |
+| `NAVEGANDO_PARA_BANDEIRA` | heading-P em `cx`; reduz `v` com erro; override total se uma roda fica perto de obstáculo (50°–130°, < 0.30 m) | `area ≥ 0.04` → POSICIONANDO; perdeu 30 frames → REDETECTANDO |
+| `REDETECTANDO_BANDEIRA` | gira em direção ao último `cx` válido | bandeira reaparece → NAVEGANDO; 8 s → EXPLORANDO |
+| `POSICIONANDO_PARA_COLETA` | alinha `cx` e aproxima até 0.40 m (LIDAR); latch de toque quando bandeira visível e LIDAR < 0.50 m | latch ou `\|err\|<0.04 ∧ \|cx\|<0.07` |
+| `CAPTURADA` | parado; anima o gripper | final |
 
-### Robustez (critério 3 do PDF)
+## Robustez
 
-- **Perda da bandeira no FOV**: estado dedicado `REDETECTANDO`, gira em
-  direção ao último `cx` válido.
-- **Obstáculos no caminho**: dodge LIDAR em `EXPLORANDO` e `NAVEGANDO`
-  com duas zonas (path/inner) e *direction-lock* temporal de 1 s para
-  evitar oscilação esquerda/direita por ruído do sensor.
-- **Raspagem lateral**: janela LIDAR 90°±40° detecta enganche da roda e
-  força rotação suave para o lado oposto.
-- **Anti-retorno-a-base**: usando o yaw de `/odom_gt`, quando o robô
-  fica orientado >107° em relação a +X (direção da bandeira-alvo nos
-  mapas suportados), aplica bias angular para reorientar e reduz a
-  velocidade linear até a reorientação terminar.
-- **Look-around periódico**: a cada 2 min sem encontrar a bandeira,
-  faz uma rotação de 180° para varrer ângulos não cobertos pela
-  serpentina (só dispara se o entorno tiver folga ≥ 0.55 m em todos os
-  360° para o gripper não bater).
-
----
+- **Perda da bandeira**: estado `REDETECTANDO` gira em direção ao último
+  `cx` válido com timeout de 8 s para `EXPLORANDO`.
+- **Obstáculos frontais**: `_resolve_turn` escolhe direção de giro
+  respeitando segurança do braço (alcance 0.5 m), das rodas (cinemática
+  diferencial) e folga traseira para recuo.
+- **Obstáculos no corredor**: projeção das leituras LIDAR em (x, y) e duas
+  zonas (path 0.35 m, inner 0.24 m) para reduzir velocidade ou parar.
+- **Enganche da roda**: janela LIDAR 90° ± 40° detecta obstáculo na zona da
+  roda (em 121°/239° em relação ao centro do LIDAR). Em `NAVEGANDO` força
+  override via `_resolve_turn` para evitar tombo.
+- **Anti-pendulação**: histerese temporal de 0.6 s no sinal de `angular.z`
+  quando o robô está parado.
+- **Watchdog**: detecta travamento via `/odom_gt`. Sem progresso em 3 s,
+  dispara recovery (recua 0.7 s + gira 0.8 s, direção alternada).
+- **Captura confiável**: latch de toque garante parada imediata quando a
+  bandeira está ao alcance do braço — a bandeira é dinâmica e cai ao ser
+  tocada.
 
 ## Estrutura do repositório
 
 ```
 ssc0712_t1/
-├── config/
-│   └── controller_config.yaml      # diff_drive_controller + gripper_controller
-├── description/
-│   └── robot.urdf.xacro            # robô diferencial: câmera segmentação, LIDAR, IMU, gripper
+├── config/controller_config.yaml
+├── description/robot.urdf.xacro
 ├── launch/
-│   ├── start_mission.launch.py     # ★ launch único da missão
-│   ├── inicia_simulacao.launch.py  # sobe Gazebo + bridges do mundo
-│   ├── carrega_robo.launch.py      # spawna o robô + controllers
-│   └── ...                         # outros launches utilitários
-├── models/                         # modelos Gazebo (ObstaculosCilindricos, Paredes, ...)
-├── rviz/                           # configurações do RViz
+│   ├── start_mission.launch.py     # launch único da missão
+│   ├── inicia_simulacao.launch.py
+│   ├── carrega_robo.launch.py
+│   └── teste_urdf.launch.py
+├── models/
+├── rviz/
 ├── ssc0712_t1/
-│   ├── flag_detector.py            # ★ detector visual (label segmentation)
-│   ├── mission_control.py          # ★ FSM + planner reativo
-│   ├── ground_truth_odometry.py    # publica /odom_gt
-│   ├── robo_mapper.py              # opcional: mapa de ocupação
-│   └── ...
-├── world/                          # mapas SDF (arena, arena_cilindros, arena_paredes, empty_arena)
+│   ├── mission_control.py          # FSM + planner reativo
+│   ├── flag_detector.py            # detector visual
+│   ├── ground_truth_odometry.py
+│   └── robo_mapper.py
+├── world/
 ├── package.xml
 ├── setup.py
 └── README.md
 ```
 
----
-
 ## Pôster / Slides
 
-Material de apresentação para a feira de extensão do ICMC:
-
-> **TODO**: substituir pelo link do pôster ou slides (Google Drive,
-> Figma, repositório etc.) — exigência do PDF do trabalho.
-
----
+> **TODO**: link do pôster ou slides para a apresentação na feira de
+> extensão do ICMC.
 
 ## Autor
 
-Samuel Ferreira (samuel.assuncao@usp.br) — SSC0712, ICMC/USP, 2026.
-
+Samuel Ferreira — SSC0712, ICMC/USP, 2026.
 Pacote base: <https://github.com/matheusbg8/prm_2026>.
-
----
-
-## Como rodar (passo a passo, no meu setup)
-
-> Confira o prompt do terminal: se aparecer `samueldbferreira@prm-humble`,
-> você já está dentro do container — pule o passo 1.
-
-```bash
-# 1. entrar no container (PULAR se ja estiver dentro)
-distrobox enter prm-humble
-
-# 2. preparar ambiente ROS (sempre antes de rodar qualquer coisa)
-source ~/ros2_ws/container_env.sh
-
-# 3. compilar
-cd ~/ros2_ws
-colcon build --symlink-install --packages-select ssc0712_t1
-
-# 4. atualizar terminal
-source install/local_setup.bash
-
-# 5. rodar
-ros2 launch ssc0712_t1 start_mission.launch.py
-```
-
-Atalho equivalente (rodar **do host**, fora do container — ele entra
-sozinho):
-
-```bash
-~/ros2_ws/m.sh sim
-~/ros2_ws/m.sh sim world:=arena_cilindros.sdf
-~/ros2_ws/m.sh kill        # mata tudo
-```

@@ -1,52 +1,39 @@
+"""Utilitario: visualiza a URDF no RViz com joint_state_publisher_gui."""
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Command
+from launch.substitutions import Command, PathJoinSubstitution
+
+from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
-# from launch import LaunchDescription
-# from launch.actions import ExecuteProcess, RegisterEventHandler
-# from launch.event_handlers import OnProcessExit
-
-# from launch_ros.substitutions import FindPackageShare
-from launch_ros.actions import Node
 
 def generate_launch_description():
-    ld = LaunchDescription()
-
     urdf_path = PathJoinSubstitution([
-        FindPackageShare("ssc0712_t1"),         # Diretório do pacote `ssc0712_t1`
-        "description",                   # Subpasta onde está o modelo
-        "robot.urdf.xacro"               # Nome do arquivo Xacro
+        FindPackageShare("ssc0712_t1"),
+        "description",
+        "robot.urdf.xacro",
     ])
-
-    # robot_description_content = ParameterValue(Command(['xacro ', urdf_path]), value_type=str)
-    robot_description_content = Command(["xacro ", urdf_path])
-
-    robot_state_publisher_node = Node(package='robot_state_publisher',
-                                      executable='robot_state_publisher',
-                                      parameters=[{
-                                          'robot_description': robot_description_content,
-                                      }])
-
-    ld.add_action(robot_state_publisher_node)
-
-
-    ld.add_action(Node(
-        package='joint_state_publisher_gui',
-        executable='joint_state_publisher_gui',
-    ))
+    robot_description = Command(["xacro ", urdf_path])
 
     rviz_config_file = PathJoinSubstitution([
         FindPackageShare("ssc0712_t1"),
         "rviz",
-        "urdf.rviz"
+        "urdf.rviz",
     ])
 
-    ld.add_action(Node(
-        package='rviz2',
-        executable='rviz2',
-        output='screen',
-        arguments=['-d', rviz_config_file],
-    ))
-
-    return ld
+    return LaunchDescription([
+        Node(
+            package='robot_state_publisher',
+            executable='robot_state_publisher',
+            parameters=[{'robot_description': robot_description}],
+        ),
+        Node(
+            package='joint_state_publisher_gui',
+            executable='joint_state_publisher_gui',
+        ),
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            output='screen',
+            arguments=['-d', rviz_config_file],
+        ),
+    ])

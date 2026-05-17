@@ -1,83 +1,44 @@
 from launch import LaunchDescription
-from launch.substitutions import PathJoinSubstitution, Command, LaunchConfiguration
-from launch.actions import ExecuteProcess, RegisterEventHandler, DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, RegisterEventHandler
 from launch.event_handlers import OnProcessExit
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 
-from launch_ros.substitutions import FindPackageShare
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
 
-
-import os
-
-# Comando para controlar o robô: ros2 run teleop_twist_keyboard teleop_twist_keyboard
 
 def generate_launch_description():
-    # Argumentos de spawn (sobrescritiveis pelo launch pai start_mission)
-    spawn_x_arg = DeclareLaunchArgument('spawn_x', default_value='-2.8',
-                                       description='Spawn X do robo (m)')
-    spawn_y_arg = DeclareLaunchArgument('spawn_y', default_value='0.0',
-                                       description='Spawn Y do robo (m)')
-    spawn_z_arg = DeclareLaunchArgument('spawn_z', default_value='0.2',
-                                       description='Spawn Z do robo (m)')
-    # ------------------------------------------------------
-    # Caminho para o arquivo Xacro do robô
-    # ------------------------------------------------------
-    # Constrói o caminho absoluto para o arquivo `robot.urdf.xacro`,
-    # localizado na pasta `description` do pacote `ssc0712_t1`.
-    urdf_path = PathJoinSubstitution([
-        FindPackageShare("ssc0712_t1"),         # Diretório do pacote `ssc0712_t1`
-        "description",                   # Subpasta onde está o modelo
-        "robot.urdf.xacro"               # Nome do arquivo Xacro
-    ])
+    spawn_x_arg = DeclareLaunchArgument('spawn_x', default_value='-2.8')
+    spawn_y_arg = DeclareLaunchArgument('spawn_y', default_value='0.0')
+    spawn_z_arg = DeclareLaunchArgument('spawn_z', default_value='0.2')
 
-    # ------------------------------------------------------
-    # Processamento do Xacro para gerar o URDF final
-    # ------------------------------------------------------
-    # Executa o comando `xacro <caminho>` em tempo de lançamento,
-    # resultando no conteúdo URDF expandido como uma string.
+    urdf_path = PathJoinSubstitution([
+        FindPackageShare("ssc0712_t1"),
+        "description",
+        "robot.urdf.xacro",
+    ])
     robot_urdf_final = Command(["xacro ", urdf_path])
 
-    # ------------------------------------------------------
-    # Nodo robot_state_publisher
-    # ------------------------------------------------------
-    # Publica as transformações dos links do robô com base no URDF.
-    # Requer o parâmetro 'robot_description' com o conteúdo do modelo.
     diff_drive_params = PathJoinSubstitution([
         FindPackageShare("ssc0712_t1"),
         "config",
-        "controller_config.yaml"
+        "controller_config.yaml",
     ])
-    
+
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
-        parameters=[
-            {"robot_description": robot_urdf_final}
-        ],
+        parameters=[{"robot_description": robot_urdf_final}],
     )
 
-    # ------------------------------------------------------
-    # Preparação do sistema de controle das rodas do robô
-    # ------------------------------------------------------
-
-    # Inicialização do sistema de controle das juntas do robo
-    # leitura do estado delas...
     load_joint_state_controller = ExecuteProcess(
         name="activate_joint_state_broadcaster",
-        cmd=[
-            "ros2",
-            "control",
-            "load_controller",
-            "--set-state",
-            "active",
-            "joint_state_broadcaster",
-        ],
+        cmd=["ros2", "control", "load_controller", "--set-state", "active",
+             "joint_state_broadcaster"],
         shell=False,
         output="screen",
     )
 
-    # Inicialização do sistema de controle das rodas/motores do robo
-    # o controle das rodas depende do estado das juntas
     start_diff_controller = Node(
         package="controller_manager",
         executable="spawner",
@@ -96,56 +57,31 @@ def generate_launch_description():
         output="screen",
     )
 
-    # Redireciona as mensagens do topico /diff_drive_base_controller/odom para /odom (Conveniencia)
-    relay_odom = Node(
-        name="relay_odom",
-        package="topic_tools",
-        executable="relay",
-        parameters=[
-            {
-                "input_topic": "/diff_drive_base_controller/odom",
-                "output_topic": "/odom",
-            }
-        ],
-        output="screen",
-    )
-
-    # Redireciona as mensagens do topico /cmd_vel para /diff_drive_base_controller/cmd_vel_unstamped (Conveniencia)
+    # diff_drive_controller publica em cmd_vel_unstamped; o mission_control publica em /cmd_vel.
     relay_cmd_vel = Node(
         name="relay_cmd_vel",
         package="topic_tools",
         executable="relay",
-        parameters=[
-            {
-                "input_topic": "/cmd_vel",
-                "output_topic": "/diff_drive_base_controller/cmd_vel_unstamped",
-            }
-        ],
+        parameters=[{
+            "input_topic": "/cmd_vel",
+            "output_topic": "/diff_drive_base_controller/cmd_vel_unstamped",
+        }],
         output="screen",
     )
 
-    # ------------------------------------------------------
-    # RViz: visualização do robô
-    # ------------------------------------------------------
-    # Carrega o arquivo de configuração do RViz a partir do pacote `ssc0712_t1`.
     rviz_config_file = PathJoinSubstitution([
         FindPackageShare("ssc0712_t1"),
         "rviz",
-        "rviz_config.rviz"
+        "rviz_config.rviz",
     ])
-
     rviz_node = Node(
         package="rviz2",
         executable="rviz2",
         name="rviz2",
         output="screen",
-        arguments=["-d", rviz_config_file],  # Define o arquivo de configuração a ser carregado
+        arguments=["-d", rviz_config_file],
     )
 
-    # ------------------------------------------------------
-    # Spawn do robô no simulador Gazebo
-    # ------------------------------------------------------
-    # Cria a entidade no mundo simulado utilizando a descrição do robô.
     spawn_entity = Node(
         package="ros_gz_sim",
         executable="create",
@@ -156,16 +92,11 @@ def generate_launch_description():
             "-x", LaunchConfiguration('spawn_x'),
             "-y", LaunchConfiguration('spawn_y'),
             "-z", LaunchConfiguration('spawn_z'),
-            "--ros-args", "--log-level", "warn"
+            "--ros-args", "--log-level", "warn",
         ],
-        parameters=[{"use_sim_time": True}],  # Usa o tempo simulado
+        parameters=[{"use_sim_time": True}],
     )
-    
-    # ------------------------------------------------------
-    # Ponte Gazebo <-> ROS 2 (ros_gz_bridge)
-    # ------------------------------------------------------
-    # Estabelece a comunicação entre os tópicos do Gazebo e os tipos de mensagem do ROS 2.
-    # Sintaxe do bridge: <topico no gazebo>@<tipo do gazebo>@<tipo do ros compativel>
+
     bridge = Node(
         package="ros_gz_bridge",
         executable="parameter_bridge",
@@ -173,47 +104,29 @@ def generate_launch_description():
         arguments=[
             "/scan@sensor_msgs/msg/LaserScan@ignition.msgs.LaserScan",
             "/imu@sensor_msgs/msg/Imu@ignition.msgs.IMU",
-            # Camera normal
-            # "/robot_cam@sensor_msgs/msg/Image@ignition.msgs.Image",
-            # "/camera_info@sensor_msgs/msg/CameraInfo@ignition.msgs.CameraInfo",
-            # Camera de segmentacao semantica
             "/robot_cam/labels_map@sensor_msgs/msg/Image@ignition.msgs.Image",
             "/robot_cam/colored_map@sensor_msgs/msg/Image@ignition.msgs.Image",
-            "/robot_cam/camera_info@sensor_msgs/msg/CameraInfo@ignition.msgs.CameraInfo",            
-            # Camera de detectao bounding box
-            # "/boxes_visible_2d_image@sensor_msgs/msg/Image@ignition.msgs.Image",
-            # "/camera_info@sensor_msgs/msg/CameraInfo@ignition.msgs.CameraInfo",
-            # Mensagem com anotacoes nao e suportado pelo ros_gz_bridge
-            # Necessário para controladores como diff_drive_controller
+            "/robot_cam/camera_info@sensor_msgs/msg/CameraInfo@ignition.msgs.CameraInfo",
             "/clock@rosgraph_msgs/msg/Clock[ignition.msgs.Clock",
-            # Ground Truth de Posicao
             "/model/prm_robot/pose@geometry_msgs/msg/Pose[ignition.msgs.Pose",
         ],
         output="screen",
     )
 
-#  Nodo que publica odometria ground truth
-    odom_gt= Node(
+    odom_gt = Node(
         package="ssc0712_t1",
         executable="ground_truth_odometry",
         name="odom_gt",
-        arguments="",
         output="screen",
     )
 
-#  Nodo que publica o mapa
-    robo_mapper= Node(
+    robo_mapper = Node(
         package="ssc0712_t1",
         executable="robo_mapper",
         name="robo_mapper",
-        arguments="",
         output="screen",
     )
 
-    # ------------------------------------------------------
-    # Definição da descrição completa do lançamento
-    # ------------------------------------------------------
-    # Inclui todos os nós definidos acima no lançamento.
     return LaunchDescription([
         spawn_x_arg,
         spawn_y_arg,
@@ -222,15 +135,15 @@ def generate_launch_description():
         robot_state_publisher_node,
         spawn_entity,
         RegisterEventHandler(
-            event_handler=OnProcessExit(  
-                target_action=spawn_entity,  # Após carregar o robo no simulador
-                on_exit=[load_joint_state_controller], # Carrega o sistema de leitura das juntas
+            event_handler=OnProcessExit(
+                target_action=spawn_entity,
+                on_exit=[load_joint_state_controller],
             )
         ),
         RegisterEventHandler(
             event_handler=OnProcessExit(
-                target_action=load_joint_state_controller, # Após carregar o sistema de leitura das juntas
-                on_exit=[start_diff_controller], # Carrega o sistema de controle das rodas/motores
+                target_action=load_joint_state_controller,
+                on_exit=[start_diff_controller],
             )
         ),
         RegisterEventHandler(
@@ -238,11 +151,9 @@ def generate_launch_description():
                 target_action=start_diff_controller,
                 on_exit=[start_gripper_controller],
             )
-        ),        
+        ),
         odom_gt,
         robo_mapper,
         rviz_node,
-  #      relay_odom, # Nodos de redirecionamento de mensagens (Estamos usando apenas odom_gt agora)
-        relay_cmd_vel # Nodos de redirecionamento de mensagens
-  #      controle
+        relay_cmd_vel,
     ])
