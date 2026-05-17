@@ -155,9 +155,9 @@ ros2 topic echo /mission_state
   diferencial) e folga traseira para recuo.
 - **Obstáculos no corredor**: projeção das leituras LIDAR em (x, y) e duas
   zonas (path 0.35 m, inner 0.24 m) para reduzir velocidade ou parar.
-- **Enganche da roda**: janela LIDAR 90° ± 40° detecta obstáculo na zona da
-  roda (em 121°/239° em relação ao centro do LIDAR). Em `NAVEGANDO` força
-  override via `_resolve_turn` para evitar tombo.
+- **Enganche da roda**: janelas LIDAR 50°–130° (esquerda) e 230°–310° (direita)
+  detectam obstáculo próximo da roda (< 0.30 m). Em `NAVEGANDO` força override
+  via `_resolve_turn` para evitar tombo.
 - **Anti-pendulação**: histerese temporal de 0.6 s no sinal de `angular.z`
   quando o robô está parado.
 - **Watchdog**: detecta travamento via `/odom_gt`. Sem progresso em 3 s,
