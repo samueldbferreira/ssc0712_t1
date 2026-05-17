@@ -19,7 +19,9 @@ posiciona para capturá-la, com controle baseado em máquina de estados.
 ## Compilação
 
 ```bash
-cd ~/ros2_ws
+cd ~/ros2_ws/src
+git clone https://github.com/samueldbferreira/ssc0712_t1.git
+cd ..
 rosdep install --from-paths src --ignore-src -r -y
 colcon build --symlink-install --packages-select ssc0712_t1
 source install/local_setup.bash
@@ -190,8 +192,7 @@ ssc0712_t1/
 
 ## Pôster / Slides
 
-> **TODO**: link do pôster ou slides para a apresentação na feira de
-> extensão do ICMC.
+[Slides](https://canva.link/dftgeds0vxx1gd6)
 
 ## Autor
 
