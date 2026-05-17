@@ -1,4 +1,4 @@
-# ssc0712_t1 — Trabalho 1: Exploração, Detecção e Captura de Bandeira
+# Trabalho 1: Exploração, Detecção e Captura de Bandeira
 
 **SSC0712 — Programação de Robôs Móveis** · ICMC/USP São Carlos
 
