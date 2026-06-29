@@ -80,6 +80,7 @@ CAPTURE_LIFT_DUR = 2.0       # tempo total de CAPTURANDO (1.0 fechar + 1.0 eleva
 
 # --- retorno a base por odometria (/odom_gt): vai direto, desvia pontual ---
 GOAL_RADIUS = 0.5            # chegou quando dist a pose inicial < isso
+RETURN_APPROACH_RADIUS = 3.0  # dentro disso larga a parede e vai reto ao ponto
 RETURN_SPEED = 0.45         # avanco no retorno (mais rapido que a navegacao)
 RETURN_KP_HEADING = 1.8     # ganho de heading p/ a base
 RETURN_TURN_IN_PLACE = 1.0  # |erro de heading| acima disso: gira no lugar (mira rapido)
@@ -363,14 +364,19 @@ class MissionControl(Node):
                 self._return_logged = True
             # recolhe a bandeira no alto (ARM_TUCK) p/ nao esbarrar nos obstaculos
             self._gripper(ARM_TUCK, GRIP_CLOSE_R, GRIP_CLOSE_L)
-            # navega pela arena com o MESMO wall-following (parede a direita) da
-            # busca, ate a odometria indicar chegada na base.
-            if (self._cur_pose and self._home_pose
-                    and math.hypot(self._home_pose[0] - self._cur_pose[0],
-                                   self._home_pose[1] - self._cur_pose[1]) < GOAL_RADIUS):
+            # Longe: wall-following (parede a direita) da busca para cruzar a
+            # arena. Perto da base: larga a parede e vai RETO ao ponto inicial
+            # (base e aberta no meio), p/ entrar nos GOAL_RADIUS e depositar.
+            dist = float('inf')
+            if self._cur_pose and self._home_pose:
+                dist = math.hypot(self._home_pose[0] - self._cur_pose[0],
+                                  self._home_pose[1] - self._cur_pose[1])
+            if dist < GOAL_RADIUS:
                 self._set_state(State.DEPOSITANDO)
+            elif dist < RETURN_APPROACH_RADIUS:
+                twist, _ = self._return_step()   # homing direto ao ponto
             else:
-                twist = self._explore_step()
+                twist = self._explore_step()     # wall-following ate a regiao
 
         elif self.state == State.DEPOSITANDO:
             t = now - self.state_entered_at
