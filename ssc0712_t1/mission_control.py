@@ -63,7 +63,11 @@ CAPTURE_ERR_DONE = 0.04       # erro de distancia maximo no done estrito
 # /gripper_controller/commands = [elevacao_rad, abertura_dir, abertura_esq]
 # (ordem do controller_config.yaml; bate com os exemplos numericos do PDF).
 ARM_DOWN = 0.0                # haste horizontal p/ frente: altura de pega do mastro
-ARM_LIFT = -0.6              # eleva a bandeira apos prender (mantem presa, parado)
+ARM_LIFT = -0.6              # eleva a bandeira apos prender (assenta o agarre)
+# No transporte recolhe bem mais (quase vertical): tira a bandeira da frente do
+# robo p/ nao esbarrar em obstaculos ao contornar (senao a projecao frontal bate
+# de lado e capota). A junta vai ate -1.57 (vertical).
+ARM_TUCK = -1.5
 GRIP_OPEN_R = -0.06          # garras abertas: o mastro entra entre as pincas
 GRIP_OPEN_L = 0.06
 # Mastro tem superficie em +-0.03. Fecho firme (perto do maximo, +-0.005): as
@@ -74,22 +78,20 @@ GRIP_CLOSE_L = 0.005
 CAPTURE_CLOSE_DUR = 1.0      # tempo fechando as garras antes de elevar
 CAPTURE_LIFT_DUR = 2.0       # tempo total de CAPTURANDO (1.0 fechar + 1.0 elevar)
 
-# --- retorno a base por odometria (/odom_gt) + contorno tipo Bug ---
+# --- retorno a base por odometria (/odom_gt): vai direto, desvia pontual ---
 GOAL_RADIUS = 0.5            # chegou quando dist a pose inicial < isso
-RETURN_KP_HEADING = 1.5      # ganho proporcional de heading p/ a base
-RETURN_HEADING_SLOW = 1.6    # |erro de heading| (rad) que zera o avanco (arca antes)
-RETURN_AVOID_MIN_TIME = 1.0  # tempo minimo contornando antes de retomar rumo
-RETURN_FRONT_CLEAR = OBSTACLE_DIST + 0.4  # frente livre exigida p/ retomar rumo
-RETURN_RESUME_ERR = 0.6      # |erro de heading| que considera a base "a frente"
+RETURN_SPEED = 0.45         # avanco no retorno (mais rapido que a navegacao)
+RETURN_KP_HEADING = 1.8     # ganho de heading p/ a base
+RETURN_TURN_IN_PLACE = 1.0  # |erro de heading| acima disso: gira no lugar (mira rapido)
 # Bandeira carregada fica no cone central do LIDAR e poluiria as leituras
 # (front/arm/corredor) -> robo "veria" obstaculo permanente. Ignora esse cone
 # durante o transporte (RETORNANDO/DEPOSITANDO).
 FLAG_CARRY_CONE_DEG = 14
 
-# --- deposito da bandeira ---
-DEPOSIT_LOWER_DUR = 0.8      # abaixa a haste (ainda fechada)
-DEPOSIT_OPEN_DUR = 1.6       # abre as garras (solta a bandeira)
-DEPOSIT_BACK_DUR = 2.4       # recua p/ deixar a bandeira no lugar
+# --- deposito da bandeira (parte do ARM_TUCK alto, entao abaixa bastante) ---
+DEPOSIT_LOWER_DUR = 2.2      # abaixa a haste de volta ao chao (ainda fechada)
+DEPOSIT_OPEN_DUR = 3.0       # abre as garras (solta a bandeira)
+DEPOSIT_BACK_DUR = 4.0       # recua p/ deixar a bandeira no lugar
 DEPOSIT_BACK_SPEED = -0.15
 
 # --- seguranca do braco (anti-arrasto ao girar) ---
@@ -171,9 +173,9 @@ class MissionControl(Node):
         self._turn_sign_t = time.monotonic()
         self._cur_pose = None
         self._home_pose = None       # pose inicial salva = alvo de retorno
-        self._return_mode = 'goal'   # 'goal' (rumo a base) | 'avoid' (contorno)
-        self._return_dir = 1         # sentido de contorno comprometido (+1 esq, -1 dir)
-        self._return_mode_t = time.monotonic()
+        self._return_dir = 1         # lado de desvio comprometido (+1 esq, -1 dir)
+        self._return_dir_t = time.monotonic()
+        self._return_logged = False
         self._last_progress_pose = None
         self._last_progress_t = time.monotonic()
         self._recovery_until = 0.0
@@ -354,10 +356,21 @@ class MissionControl(Node):
                 self._set_state(State.RETORNANDO_BASE)
 
         elif self.state == State.RETORNANDO_BASE:
-            self._gripper(ARM_LIFT, GRIP_CLOSE_R, GRIP_CLOSE_L)  # mantem a bandeira presa
-            twist, arrived = self._return_step()
-            if arrived:
+            if not self._return_logged and self._cur_pose and self._home_pose:
+                self.get_logger().info(
+                    f'[retorno] base={self._home_pose} '
+                    f'pos atual=({self._cur_pose[0]:.1f},{self._cur_pose[1]:.1f})')
+                self._return_logged = True
+            # recolhe a bandeira no alto (ARM_TUCK) p/ nao esbarrar nos obstaculos
+            self._gripper(ARM_TUCK, GRIP_CLOSE_R, GRIP_CLOSE_L)
+            # navega pela arena com o MESMO wall-following (parede a direita) da
+            # busca, ate a odometria indicar chegada na base.
+            if (self._cur_pose and self._home_pose
+                    and math.hypot(self._home_pose[0] - self._cur_pose[0],
+                                   self._home_pose[1] - self._cur_pose[1]) < GOAL_RADIUS):
                 self._set_state(State.DEPOSITANDO)
+            else:
+                twist = self._explore_step()
 
         elif self.state == State.DEPOSITANDO:
             t = now - self.state_entered_at
@@ -455,9 +468,10 @@ class MissionControl(Node):
         t.linear.x = self._wheel_cap(t.linear.x)
         return t
 
-    def _navigate_toward(self, cx: float) -> Twist:
+    def _navigate_toward(self, cx: float, turn_pref=None) -> Twist:
         """Heading-P em cx + reducao de v com erro, com desvio reativo (corredor,
-        frente, roda). Usado para convergir tanto na bandeira quanto na base."""
+        frente, roda). turn_pref: lado preferido ao desviar de obstaculo frontal
+        (+1 esq, -1 dir) -- no retorno aponta p/ a base; senao segue a serpentina."""
         t = Twist()
         t.angular.z = -1.2 * cx
         v = V_NAV * max(0.0, 1.0 - abs(cx))
@@ -478,7 +492,8 @@ class MissionControl(Node):
             v *= 0.40
 
         if self.front_min < OBSTACLE_DIST:
-            linear, ang_mult = self._resolve_turn(self._pick_turn_dir())
+            pref = turn_pref if turn_pref is not None else self._pick_turn_dir()
+            linear, ang_mult = self._resolve_turn(pref)
             v = linear
             t.angular.z = ang_mult * W_TURN_OBSTACLE
 
@@ -497,27 +512,17 @@ class MissionControl(Node):
         cx = self.flag[1] if self.flag[0] else self.last_flag_cx * 0.4
         return self._navigate_toward(cx)
 
-    def _goal_twist(self, err: float) -> Twist:
-        """Twist que aponta para a base (heading-P), com seguranca de roda."""
-        t = Twist()
-        v = V_NAV * max(0.0, 1.0 - abs(err) / RETURN_HEADING_SLOW)
-        t.linear.x = self._wheel_cap(v)
-        t.angular.z = max(-1.0, min(1.0, RETURN_KP_HEADING * err))
-        return t
-
     def _return_step(self):
-        """Volta a pose inicial (/odom_gt) com contorno de obstaculos tipo Bug:
-        vai reto a base ('goal'); ao bloquear, compromete um lado e segue a
-        borda do obstaculo ('avoid') ate a base voltar a estar livre a frente,
-        entao retoma o rumo. Nao tenta linha reta cega. Retorna (twist, chegou)."""
-        t = Twist()
+        """Volta a pose inicial reusando a MESMA navegacao/desvio que leva ate a
+        bandeira (_navigate_toward) -- proven. So troca o alvo: em vez do cx da
+        visao, um cx derivado do rumo para a base. Retorna (twist, chegou)."""
         if self._cur_pose is None or self._home_pose is None:
-            return t, False
+            return Twist(), False
         x, y, yaw = self._cur_pose
         dx = self._home_pose[0] - x
         dy = self._home_pose[1] - y
         if math.hypot(dx, dy) < GOAL_RADIUS:
-            return t, True
+            return Twist(), True
 
         err = math.atan2(dy, dx) - yaw
         while err > math.pi:
@@ -525,48 +530,14 @@ class MissionControl(Node):
         while err < -math.pi:
             err += 2 * math.pi
 
-        now = time.monotonic()
-
-        # --- modo GOAL: aponta para a base ---
-        if self._return_mode == 'goal':
-            if self.front_min < OBSTACLE_DIST:
-                # bloqueado: compromete o lado de contorno (o mais aberto;
-                # desempate p/ o lado da base) e passa para 'avoid'.
-                if abs(self.side_left_min - self.side_right_min) < 0.4:
-                    self._return_dir = 1 if err >= 0 else -1
-                else:
-                    self._return_dir = 1 if self.side_left_min > self.side_right_min else -1
-                self._return_mode = 'avoid'
-                self._return_mode_t = now
-            else:
-                return self._goal_twist(err), False
-
-        # --- modo AVOID: contorna a borda do obstaculo ---
-        if (now - self._return_mode_t > RETURN_AVOID_MIN_TIME
-                and abs(err) < RETURN_RESUME_ERR
-                and self.front_min > RETURN_FRONT_CLEAR):
-            self._return_mode = 'goal'
-            return self._goal_twist(err), False
-
-        d = self._return_dir
-        if self.front_min < OBSTACLE_DIST:
-            # ainda bloqueado: gira no lugar no sentido comprometido.
-            linear, ang_mult = self._resolve_turn(d)
-            t.linear.x = linear
-            t.angular.z = ang_mult * W_TURN_OBSTACLE
-        else:
-            # frente livre: avanca colado na borda. Virou p/ esquerda (d>0)
-            # => obstaculo ficou a direita => mantem banda na parede direita.
-            t.linear.x = self._wheel_cap(V_NAV * 0.6)
-            if d > 0:
-                wall = self.side_right_min
-                t.angular.z = -0.4 if wall > WALL_FOLLOW_FAR else (
-                    0.4 if wall < WALL_FOLLOW_NEAR else 0.0)
-            else:
-                wall = self.side_left_min
-                t.angular.z = 0.4 if wall > WALL_FOLLOW_FAR else (
-                    -0.4 if wall < WALL_FOLLOW_NEAR else 0.0)
-        return t, False
+        # cx equivalente ao da visao: base a esquerda (err>0) -> cx<0, como uma
+        # bandeira a esquerda. |cx|=1 (base atras) -> gira no lugar e desvia
+        # exatamente como na navegacao para a bandeira.
+        cx_home = max(-1.0, min(1.0, -err / RETURN_TURN_IN_PLACE))
+        # ao desviar de obstaculo, vira para o lado da base (err>0 = base a
+        # esquerda = +1), nunca pelo lado "errado" da serpentina.
+        turn_pref = 1 if err >= 0 else -1
+        return self._navigate_toward(cx_home, turn_pref), False
 
     def _position_step(self):
         """Aproximacao final em duas fases para nao derrubar o mastro:
@@ -651,10 +622,10 @@ class MissionControl(Node):
         dy = self._cur_pose[1] - self._last_progress_pose[1]
         progressed = math.hypot(dx, dy) > STUCK_DIST
 
-        # REDETECTANDO e a virada inicial do RETORNANDO sao giro puro (v=0):
-        # aceita yaw liquido como progresso p/ o watchdog nao disparar recovery.
-        if not progressed and self.state in (
-                State.REDETECTANDO_BANDEIRA, State.RETORNANDO_BASE):
+        # REDETECTANDO eh giro puro: aceita yaw liquido como progresso. O
+        # RETORNANDO NAO entra aqui de proposito: se ficar oscilando sem
+        # avancar (encurralado), o watchdog precisa disparar recovery p/ escapar.
+        if not progressed and self.state == State.REDETECTANDO_BANDEIRA:
             dyaw = self._cur_pose[2] - self._last_progress_pose[2]
             while dyaw > math.pi:
                 dyaw -= 2 * math.pi

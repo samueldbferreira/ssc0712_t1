@@ -1,10 +1,11 @@
-# Trabalho 1: Exploração, Detecção e Captura de Bandeira
+# Captura da Bandeira (Trabalhos 1 e 2)
 
 **SSC0712 — Programação de Robôs Móveis** · ICMC/USP São Carlos
 
-Sistema autônomo em ROS 2 que explora a arena, detecta uma bandeira por
-visão computacional (câmera de segmentação semântica do Gazebo) e se
-posiciona para capturá-la, com controle baseado em máquina de estados.
+Sistema autônomo em ROS 2 que explora a arena, detecta a bandeira inimiga por
+visão computacional (câmera de segmentação semântica do Gazebo), navega até
+ela, **captura com o manipulador (garra), levanta, transporta de volta à base
+e deposita** — tudo orquestrado por uma máquina de estados.
 
 ---
 
@@ -35,7 +36,7 @@ ros2 launch ssc0712_t1 start_mission.launch.py
 
 Sobe simulação + robô + sensores + detector visual + máquina de estados em
 um único comando. O robô parte de `AGUARDANDO_COMANDO`, espera 5 s e segue
-sozinho até `CAPTURADA`.
+sozinho: localiza e captura a bandeira, retorna à base e deposita (`CONCLUIDO`).
 
 Trocar de mapa:
 
@@ -92,9 +93,9 @@ ros2 topic echo /mission_state
   `/flag_detection` com `[detected, cx_norm, cy_norm, area_ratio]`.
 
 - **`mission_control`**: nó principal. FSM a 10 Hz, consome
-  `/flag_detection`, `/scan`, `/odom_gt`, publica `/cmd_vel` e
-  `/mission_state`. Fluxo do loop: watchdog → FSM → filtro anti-pendulação
-  → publish.
+  `/flag_detection`, `/scan`, `/odom_gt`, publica `/cmd_vel`,
+  `/mission_state` e `/gripper_controller/commands` (garra). Fluxo do loop:
+  watchdog → FSM → filtro anti-pendulação → publish.
 
 - **`ground_truth_odometry`**: republica a pose do simulador como
   `/odom_gt` e TF `odom_gt → base_link`.
@@ -130,7 +131,19 @@ ros2 topic echo /mission_state
 │  └──────────┬───────────┘                │
 │             ▼                            │
 │  ┌──────────────────────┐                │
-│  │     CAPTURADA        │                │
+│  │     CAPTURANDO       │ fecha + eleva  │
+│  └──────────┬───────────┘                │
+│             ▼                            │
+│  ┌──────────────────────┐                │
+│  │   RETORNANDO_BASE    │ odom + desvio  │
+│  └──────────┬───────────┘                │
+│             ▼                            │
+│  ┌──────────────────────┐                │
+│  │     DEPOSITANDO      │ abaixa + solta │
+│  └──────────┬───────────┘                │
+│             ▼                            │
+│  ┌──────────────────────┐                │
+│  │      CONCLUIDO       │                │
 │  └──────────────────────┘                │
 │                                          │
 └────────── 8 s sem achar ─────────────────┘
@@ -143,8 +156,11 @@ ros2 topic echo /mission_state
 | `BANDEIRA_DETECTADA` | parado 0.5 s para registrar a transição | timer |
 | `NAVEGANDO_PARA_BANDEIRA` | heading-P em `cx`; reduz `v` com erro; override total se uma roda fica perto de obstáculo (50°–130°, < 0.30 m) | `area ≥ 0.04` → POSICIONANDO; perdeu 30 frames → REDETECTANDO |
 | `REDETECTANDO_BANDEIRA` | gira em direção ao último `cx` válido | bandeira reaparece → NAVEGANDO; 8 s → EXPLORANDO |
-| `POSICIONANDO_PARA_COLETA` | alinha `cx` e aproxima até 0.40 m (LIDAR); latch de toque quando bandeira visível e LIDAR < 0.50 m | latch ou `\|err\|<0.04 ∧ \|cx\|<0.07` |
-| `CAPTURADA` | parado; anima o gripper | final |
+| `POSICIONANDO_PARA_COLETA` | abre a garra; alinha girando no lugar e só então faz creep reto (anti-derrubada); latch quando o mastro está na zona de pega | latch / done → CAPTURANDO |
+| `CAPTURANDO` | parado; fecha as garras no mastro (~1 s) e eleva a haste | timer → RETORNANDO_BASE |
+| `RETORNANDO_BASE` | recolhe a bandeira no alto (`ARM_TUCK`) e volta à **pose inicial salva** (`/odom_gt`) reusando a mesma navegação+desvio da ida; cone central do LIDAR mascarado p/ ignorar a bandeira carregada | dist < 0.5 m → DEPOSITANDO |
+| `DEPOSITANDO` | abaixa a haste, abre as garras (solta) e recua | timer → CONCLUIDO |
+| `CONCLUIDO` | parado; garra em repouso | final |
 
 ## Robustez
 
@@ -161,10 +177,18 @@ ros2 topic echo /mission_state
 - **Anti-pendulação**: histerese temporal de 0.6 s no sinal de `angular.z`
   quando o robô está parado.
 - **Watchdog**: detecta travamento via `/odom_gt`. Sem progresso em 3 s,
-  dispara recovery (recua 0.7 s + gira 0.8 s, direção alternada).
-- **Captura confiável**: latch de toque garante parada imediata quando a
-  bandeira está ao alcance do braço — a bandeira é dinâmica e cai ao ser
-  tocada.
+  dispara recovery (recua 0.7 s + gira 0.8 s, direção alternada). Aceita giro
+  líquido como progresso em `REDETECTANDO` e `RETORNANDO_BASE` (viradas no lugar).
+- **Alinhamento da garra**: o detector estima o `cx` pelo terço inferior da
+  máscara (só o mastro; o painel fica no alto e desviaria o centroide), e a
+  aproximação alinha girando antes de encostar — para o mastro entrar entre as
+  pinças sem ser derrubado.
+- **Transporte sem esbarrar**: a bandeira é recolhida no alto (`ARM_TUCK`,
+  quase vertical) durante o retorno, tirando-a da frente do robô; o cone
+  central do LIDAR é mascarado para não confundir a bandeira com obstáculo.
+- **Retorno sem mapa**: a pose inicial (centro da base) é salva no primeiro
+  `/odom_gt` e usada como alvo de `RETORNANDO_BASE`, reusando a mesma
+  navegação reativa que leva até a bandeira.
 
 ## Estrutura do repositório
 
