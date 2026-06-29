@@ -26,8 +26,9 @@ class State(Enum):
     BANDEIRA_DETECTADA = "BANDEIRA_DETECTADA"            # pausa breve apos avistar
     NAVEGANDO_PARA_BANDEIRA = "NAVEGANDO_PARA_BANDEIRA"  # converge para o alvo
     REDETECTANDO_BANDEIRA = "REDETECTANDO_BANDEIRA"      # gira procurando alvo perdido
-    POSICIONANDO_PARA_COLETA = "POSICIONANDO_PARA_COLETA"  # aproximacao final
-    CAPTURADA = "CAPTURADA"                              # missao completa
+    POSICIONANDO_PARA_COLETA = "POSICIONANDO_PARA_COLETA"  # aproximacao final (garra aberta)
+    CAPTURANDO = "CAPTURANDO"                            # fecha a garra e eleva a bandeira
+    CAPTURADA = "CAPTURADA"                              # bandeira presa e elevada (final)
 
 
 # --- velocidades (m/s e rad/s) ---
@@ -49,9 +50,27 @@ DET_AREA = 3                  # fracao da imagem ocupada pela bandeira
 MIN_DETECT_AREA = 0.00013     # ~10 px em 320x240; sincronizado com MIN_PIXELS do detector
 # Gates da captura --- PDF exige "de frente E na distancia":
 CAPTURE_MIN_AREA = 0.08       # area visual ~0.6m, confirma que LIDAR le o mastro
-CAPTURE_CX_LATCH = 0.12       # orientacao p/ latch (frente folgada)
-CAPTURE_CX_DONE = 0.07        # orientacao p/ done estrito (de frente preciso)
+# cx ja aponta para o mastro (terco inferior da mascara). Tolerancia lateral
+# ~+-0.03m a 0.43m -> cx=0.05 ~= 1.7cm. Apertado p/ a garra nao raspar no mastro.
+CAPTURE_CX_ALIGN = 0.04       # so faz creep reto com |cx| abaixo disso (anti-derrubada)
+CAPTURE_CX_LATCH = 0.06       # orientacao p/ latch (frente folgada)
+CAPTURE_CX_DONE = 0.035       # orientacao p/ done estrito (de frente preciso)
 CAPTURE_ERR_DONE = 0.04       # erro de distancia maximo no done estrito
+
+# --- captura com a garra ---
+# /gripper_controller/commands = [elevacao_rad, abertura_dir, abertura_esq]
+# (ordem do controller_config.yaml; bate com os exemplos numericos do PDF).
+ARM_DOWN = 0.0                # haste horizontal p/ frente: altura de pega do mastro
+ARM_LIFT = -0.6              # eleva a bandeira apos prender (mantem presa, parado)
+GRIP_OPEN_R = -0.06          # garras abertas: o mastro entra entre as pincas
+GRIP_OPEN_L = 0.06
+# Mastro tem superficie em +-0.03. Fecho firme (perto do maximo, +-0.005): as
+# pincas param no mastro e cravam com forca -> segura ao levantar. Foi o que
+# agarrou nos testes anteriores.
+GRIP_CLOSE_R = -0.005
+GRIP_CLOSE_L = 0.005
+CAPTURE_CLOSE_DUR = 1.0      # tempo fechando as garras antes de elevar
+CAPTURE_LIFT_DUR = 2.0       # tempo total de CAPTURANDO (1.0 fechar + 1.0 elevar)
 
 # --- seguranca do braco (anti-arrasto ao girar) ---
 ARM_REACH = 0.50              # raio em que o braco pode tocar obstaculo (m)
@@ -283,14 +302,22 @@ class MissionControl(Node):
                 self._set_state(State.EXPLORANDO)
 
         elif self.state == State.POSICIONANDO_PARA_COLETA:
+            self._gripper(ARM_DOWN, GRIP_OPEN_R, GRIP_OPEN_L)  # abre p/ o mastro entrar
             twist, done = self._position_step()
             if not self.flag[0] and self.lost_counter >= self.lost_frames_to_redetect:
                 self._set_state(State.REDETECTANDO_BANDEIRA)
             elif done:
+                self._set_state(State.CAPTURANDO)
+
+        elif self.state == State.CAPTURANDO:
+            t = now - self.state_entered_at
+            elevation = ARM_DOWN if t < CAPTURE_CLOSE_DUR else ARM_LIFT
+            self._gripper(elevation, GRIP_CLOSE_R, GRIP_CLOSE_L)
+            if t > CAPTURE_LIFT_DUR:
                 self._set_state(State.CAPTURADA)
 
         elif self.state == State.CAPTURADA:
-            self._celebrate(now - self.state_entered_at)
+            self._gripper(ARM_LIFT, GRIP_CLOSE_R, GRIP_CLOSE_L)  # mantem presa e elevada
 
         return twist
 
@@ -413,35 +440,38 @@ class MissionControl(Node):
         return t
 
     def _position_step(self):
-        """Aproximacao final: alinha cx e converge para capture_distance.
-        Latch de toque para nao perseguir a bandeira ja derrubada."""
+        """Aproximacao final em duas fases para nao derrubar o mastro:
+        (1) alinha girando no lugar ate o mastro ficar centrado; (2) so entao
+        avanca reto e devagar. As pincas abertas vao ~0.5m a frente (alem do
+        mastro), entao girar enquanto avanca varre o mastro de lado e o derruba."""
         t = Twist()
         if self._touch_latched:
             return t, True
         cx = self.flag[1]
         d = self.front_min
         err = d - self.capture_distance
-        # PDF exige "de frente E na distancia". Latch: orientacao folgada
-        # + LIDAR perto, captura antes da bandeira cair. Done: orientacao
-        # e distancia precisas. Area confirma que o LIDAR le o mastro.
         flag_close = self.flag[0] and self.flag[3] >= CAPTURE_MIN_AREA
-        if flag_close and abs(cx) < CAPTURE_CX_LATCH and d < self.capture_distance + 0.10:
+
+        # Fase 1: desalinhado -> gira no lugar (sem avancar).
+        if abs(cx) > CAPTURE_CX_ALIGN:
+            t.angular.z = -1.2 * cx
+            return t, False
+
+        # Fase 2: alinhado. Mastro na zona de pega -> latch.
+        if flag_close and abs(cx) < CAPTURE_CX_LATCH and d < self.capture_distance + 0.05:
             self._touch_latched = True
             return t, True
-        t.angular.z = -1.5 * cx
-        v = max(-0.05, min(0.12, 0.5 * err))
-        if abs(cx) > 0.15:
-            v = 0.0
-        t.linear.x = v
+
+        # Creep reto e lento; correcao de heading bem suave para nao varrer.
+        t.angular.z = -0.4 * cx
+        t.linear.x = max(0.03, min(0.10, 0.5 * err))
         done = flag_close and abs(err) < CAPTURE_ERR_DONE and abs(cx) < CAPTURE_CX_DONE
         return t, done
 
-    def _celebrate(self, t: float):
-        """Anima o gripper na captura: balanca o braco e abre/fecha as garras."""
+    def _gripper(self, elevation: float, right: float, left: float):
+        """Publica comando da garra: [elevacao, abertura_dir, abertura_esq]."""
         msg = Float64MultiArray()
-        open_phase = (math.sin(t * 4.0) + 1.0) * 0.5
-        ext = -0.5 + 0.3 * math.sin(t * 2.0)
-        msg.data = [ext, 0.06 * open_phase, -0.06 * open_phase]
+        msg.data = [elevation, right, left]
         self.gripper_pub.publish(msg)
 
     def _set_state(self, new_state: State):

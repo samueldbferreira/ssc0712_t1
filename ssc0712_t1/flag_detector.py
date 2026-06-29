@@ -68,7 +68,14 @@ class FlagDetector(Node):
 
         if n_pixels >= MIN_PIXELS:
             ys, xs = np.where(mask)
-            cx = float(xs.mean())
+            # O painel fica no alto e deslocado lateralmente: o centroide do
+            # conjunto (mastro+painel) nao coincide com o mastro. A garra agarra
+            # o mastro, entao o cx de alinhamento usa so o terco inferior da
+            # mascara, onde so existe o mastro (linhas de baixo da imagem).
+            y_min, y_max = int(ys.min()), int(ys.max())
+            cutoff = y_max - 0.35 * (y_max - y_min)
+            pole_xs = xs[ys >= cutoff]
+            cx = float(pole_xs.mean()) if pole_xs.size else float(xs.mean())
             cy = float(ys.mean())
             out.data = [
                 1.0,

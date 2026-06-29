@@ -5,6 +5,7 @@ from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitut
 
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -17,7 +18,7 @@ def generate_launch_description():
         "description",
         "robot.urdf.xacro",
     ])
-    robot_urdf_final = Command(["xacro ", urdf_path])
+    robot_urdf_final = ParameterValue(Command(["xacro ", urdf_path]), value_type=str)
 
     diff_drive_params = PathJoinSubstitution([
         FindPackageShare("ssc0712_t1"),
