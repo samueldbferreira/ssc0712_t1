@@ -158,7 +158,7 @@ ros2 topic echo /mission_state
 | `REDETECTANDO_BANDEIRA` | gira em direção ao último `cx` válido | bandeira reaparece → NAVEGANDO; 8 s → EXPLORANDO |
 | `POSICIONANDO_PARA_COLETA` | abre a garra; alinha girando no lugar e só então faz creep reto (anti-derrubada); latch quando o mastro está na zona de pega | latch / done → CAPTURANDO |
 | `CAPTURANDO` | parado; fecha as garras no mastro (~1 s) e eleva a haste | timer → RETORNANDO_BASE |
-| `RETORNANDO_BASE` | recolhe a bandeira no alto (`ARM_TUCK`) e volta à **pose inicial salva** (`/odom_gt`) reusando a mesma navegação+desvio da ida; cone central do LIDAR mascarado p/ ignorar a bandeira carregada | dist < 0.5 m → DEPOSITANDO |
+| `RETORNANDO_BASE` | recolhe a bandeira no alto (`ARM_TUCK`); volta à **pose inicial salva** (`/odom_gt`): longe (> 3 m) usa o wall-following da direita da busca, perto vai reto ao ponto; cone central do LIDAR mascarado p/ ignorar a bandeira carregada | dist < 0.5 m → DEPOSITANDO |
 | `DEPOSITANDO` | abaixa a haste, abre as garras (solta) e recua | timer → CONCLUIDO |
 | `CONCLUIDO` | parado; garra em repouso | final |
 
@@ -187,8 +187,10 @@ ros2 topic echo /mission_state
   quase vertical) durante o retorno, tirando-a da frente do robô; o cone
   central do LIDAR é mascarado para não confundir a bandeira com obstáculo.
 - **Retorno sem mapa**: a pose inicial (centro da base) é salva no primeiro
-  `/odom_gt` e usada como alvo de `RETORNANDO_BASE`, reusando a mesma
-  navegação reativa que leva até a bandeira.
+  `/odom_gt` e usada como alvo de `RETORNANDO_BASE`. Longe da base, segue o
+  wall-following da direita (mesma traversal robusta da busca) para cruzar a
+  arena; ao chegar na região (< 3 m), larga a parede e vai reto ao ponto
+  salvo, entrando no raio de chegada para depositar.
 
 ## Estrutura do repositório
 
