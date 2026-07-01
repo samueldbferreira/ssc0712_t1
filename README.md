@@ -14,16 +14,23 @@ e deposita** — tudo orquestrado por uma máquina de estados.
 - **ROS 2 Humble** (Ubuntu 22.04)
 - **Gazebo Fortress** (Ignition Gazebo 6)
 - Python 3.10+
-- Dependências resolvidas via `rosdep`: `ros_gz_bridge`, `robot_state_publisher`,
-  `ros2_control`, `ros2_controllers`, `xacro`, `rviz2`, `cv_bridge`, `scipy`
+- Dependências ROS/Python resolvidas via `rosdep` (declaradas no `package.xml`):
+  `ros_gz_bridge`, `ros_gz_sim`, `robot_state_publisher`, `ros2_control`,
+  `ros2_controllers`, `controller_manager`, `xacro`, `rviz2`, `cv_bridge`,
+  `topic_tools`, `python3-numpy`, `python3-scipy`.
+- **`ign_ros2_control`** não tem chave no `rosdep` — instale à parte:
+  `sudo apt install ros-humble-ign-ros2-control`
 
 ## Compilação
 
+Do zero em outra máquina (com ROS 2 Humble já instalado):
+
 ```bash
-cd ~/ros2_ws/src
+mkdir -p ~/ros2_ws/src && cd ~/ros2_ws/src
 git clone https://github.com/samueldbferreira/ssc0712_t1.git
-cd ..
-rosdep install --from-paths src --ignore-src -r -y
+cd ~/ros2_ws
+sudo apt install ros-humble-ign-ros2-control      # sem chave rosdep
+rosdep install --from-paths src --ignore-src -r -y # demais dependencias
 colcon build --symlink-install --packages-select ssc0712_t1
 source install/local_setup.bash
 ```
